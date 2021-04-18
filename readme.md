@@ -1,6 +1,6 @@
-# Welcome to SuPyFit!
+# Welcome to Superfit in Python! :dizzy: :bomb: :boom:
 
-SuPyFit (Python Superfit) is a software for the spectral classification of Supernovae 
+Superfit in python (pySF) is a software for the spectral classification of Supernovae of all major types 
 
 ## Requierments
 
@@ -14,8 +14,16 @@ SuPyFit (Python Superfit) is a software for the spectral classification of Super
 
 
 ## Install 
+The user must make sure to have a template bank to look at. The new template bank is not in the GitHub because of space limitations, however it can be downloaded from my Dropbox as a zip file, please email me for the Dropbox link.
 
-Before anything the user should unzip the `original_sf_bank.zip` and then open the `template_bank_setup.py` script. In this file the user should specify the desired resolution for the template library, along with the path of the original data and the path for the new resolution template bank. The user also has the option to create a bank with masked lines, meaning to mask host galaxy lines that could be in the templates, this option is default to False. If the user is interested in seeing which lines are being masked he can access the `mask_lines_bank` function within the `Header_binnings.py` file.
+
+# New template bank
+
+The improved Superfit template bank contains major subclasses such as: calcium rich supernovae, type II flashers, TDEs, SLSN-I and II, among others, separated in different folders for more accurate classification. The default option for binning in 10A. 
+The user must make sure to have this template bank or some alternative template bank of his own in order to run pySF, and please be mindful that pySF is only as good as the template bank it uses.
+
+
+The user has the option to create a bank with masked lines, meaning to mask host galaxy lines that could be in the templates, this option is default to False. If the user is interested in seeing which lines are being masked he can access the `mask_lines_bank` function within the `Header_binnings.py` file.
 
 
 
@@ -29,6 +37,8 @@ To achieve this task the files needed are:
 - `SF_functions.py`
 - `params.py`
 - `run.py`
+- `auxiliary.py`
+- `get_metadata.py`
 
 
 In the `params.py` file there are three paths that the user should change.
@@ -59,7 +69,7 @@ The inputs of the function are updated in the `params.py` file and are as follow
 - `templates_sn_trunc:`  truncated library of supernovae, aka: which SN types to look at when optimizing.
 - `templates_gal_trunc:` truncated library of host galaxies, aka: which HG types to look at when optimizing.
 - `lam:` lambda array over which to perform the fit. The default is from 3000 A to 10500 A. 
-- `resolution:` resolution at which to bin and perform the fit. The default is 20 A. 
+- `resolution:` resolution at which to bin and perform the fit. The default is 10 A. 
 - `n:` this corresponds to the number of plots to show and save as a result. 
 - `plot:` either 1 or 0, to either plot or not plot. 
 - `kind:` corresponds to the type of error spectrum the user prefers, the options are `SG`:Savitsky Golay, `linear`: for obtaining the error of the spectrum 
@@ -75,6 +85,15 @@ The rest the inputs correspond to the paths mentioned above.
 ## Results
 
 The results are: an astropy table that is saved as a csv file (to the specified path) and the best fit plots saved as pdf files (to the specified path)
+
+
+## The output graphs look like this
+
+
+![Output](eg.png)
+
+
+The plot shows the input object in red, the SN and Host Galaxy combined templates in green. The legend shows the SN type, HG type and percentage contribution from the SN template to the fit. On top of the plot the redshift value is indicated.
 
 
 ## To Run
