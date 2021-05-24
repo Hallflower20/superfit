@@ -1,19 +1,21 @@
 import sys 
-from superfit.SF_functions import *
-from superfit.Header_Binnings import *
+from SF_functions import *
+from Header_Binnings import *
 from params import *
 import numpy as np 
+import json 
 
-# Enter path of object of interest, can also be specified as input
+with open("parameters.json", "r") as read_file:
+    data = json.load(read_file)
+
+
+original = data['original']
+spectrum = np.loadtxt(original)
 
 
 
-original=sys.argv[1]
-
-#original = 'ZTF18aahhzqn_20180421_P60_v1.ascii'
 idx=original.rfind('/')
 filename=original[idx+1:]
-
 
 try:
     binned_name= obj_name_int(original, lam, resolution)[3]
