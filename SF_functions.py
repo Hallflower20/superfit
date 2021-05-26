@@ -437,7 +437,8 @@ def core_total(z,extcon, templates_sn_trunc, templates_gal_trunc, lam, resolutio
         JD = supernova_file[iii+1:]
         kind = supernova_file[ii+1:idex]
        
-
+        mjd = -1
+        band = ""
         for i in range(0, len(mjd_max['Name'])):
     
             if str(mjd_max['Name'][i]) == str(kind):
@@ -445,7 +446,7 @@ def core_total(z,extcon, templates_sn_trunc, templates_gal_trunc, lam, resolutio
                 mjd = mjd_max['mjd_peak'][i]
 
         if float(mjd) == -1:
-            
+            band = np.nan
             phase = np.nan 
 
         else: 
@@ -687,6 +688,8 @@ def all_parameter_space(redshift, extconstant, templates_sn_trunc, templates_gal
         idx=templates_sn_trunc[i].rfind("/")+1
         filename=templates_sn_trunc[i][idx:]
         
+        if("." not in filename):
+            filename += "."
 
         short_name = str(get_metadata.shorhand_dict[filename])
     
