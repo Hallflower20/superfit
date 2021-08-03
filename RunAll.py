@@ -11,6 +11,7 @@ from params import *
 import numpy as np 
 import glob
 from astropy.table import Table
+import astropy
 # Enter path of object of interest, can also be specified as input
 
 
@@ -34,13 +35,15 @@ sample.rename_column('col2', "Class")
 sample.rename_column('col3', "redshift")
 sample.rename_column('col8', "Version")
 
+missing = Table.read("/mnt/c/Users/20xha/Documents/GitHub/supernova-spectrum-analysis/ZooniverseAnalysis/missing.csv")
 
+joined = astropy.table.join(missing, sample)
 # In[5]:
 
 
-counter = 820
+counter = 0
 print(counter)
-for row in sample[820:]:
+for row in joined[50:]:
     try:
         with open("parameters.json", "r") as read_file:
             data = json.load(read_file)
@@ -101,13 +104,13 @@ for row in sample[820:]:
         n = data['n']
         
         if (counter % 250 == 0):
-            print("{} / {}".format(counter, len(sample)))
+            print("{} / {}".format(counter, len(joined)))
         counter += 1
         
         filename = row["Version"]
         original = objects_path + filename
         if(original in objects_list):
-            n = 3
+            n = 1
             resolution = data['resolution']
             upper      = data['upper']
             lower      = data['lower']
@@ -124,12 +127,16 @@ for row in sample[820:]:
             interval   = int((upper - lower)/resolution)
             lam        =     np.linspace(lower, upper, interval)
             
-            redshift_0 = redshifts_all.iloc[np.where(redshifts_all["ZTFID"] == row["ZTF_Name"])[0]]["redshift"].values[0]
+            where = np.where(redshifts_all["ZTFID"] == row["ZTF_Name"])[0]
+            first = False
+            if(len(where) != 0):
+                redshift_0 = redshifts_all.iloc[where]["redshift"].values[0]
+                if(redshift_0 != '-'):
+                    redshift_0 = float(redshift_0)
+                    redshift = np.linspace(redshift_0 - 0.05 * redshift_0, redshift_0 + 0.05 * redshift_0, 3)
+                    first = True
             redshift_1 = row["redshift"]
-            if(redshift_0 != '-'):
-                redshift_0 = float(redshift_0)
-                redshift = np.linspace(redshift_0 - 0.05 * redshift_0, redshift_0 + 0.05 * redshift_0, 3)
-            elif(not(np.isnan(redshift_1))):
+            if(not(np.isnan(redshift_1)) and not(first)):
                 redshift = np.linspace(redshift_1 - 0.05 * redshift_1, redshift_1 + 0.05 * redshift_1, 3)
             else:
                 redshift = np.linspace(0, 0.2, 21)
@@ -173,6 +180,7 @@ for row in sample[820:]:
                     lam, resolution, n=n, plot=plotting, kind=kind, original=save_bin, save=save_results_path, show=show)
     except:
         print('An error has occured when trying to optimize for spectrum file {}. Inspect input spectrum and parameters. Stopping at {}'.format(binned_name, counter - 1))
+        break
 
 
 # In[ ]:

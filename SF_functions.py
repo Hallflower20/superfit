@@ -437,7 +437,6 @@ def core_total(z,extcon, templates_sn_trunc, templates_gal_trunc, lam, resolutio
         JD = supernova_file[iii+1:]
         kind = supernova_file[ii+1:idex]
        
-        mjd = -1
         band = ""
         for i in range(0, len(mjd_max['Name'])):
     
