@@ -1,14 +1,7 @@
-from scipy import interpolate
-from scipy import stats
-import scipy.optimize
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
 import statistics 
 from matplotlib.pyplot import show, plot
 import numpy as np
 import scipy.signal as mf 
-
-
 
 
 def linear_error(spec_object): 
@@ -46,26 +39,6 @@ def linear_error(spec_object):
         y = m[n]*lam_new[n]+b[n]
           
         r = flux_new - y
-        
-        '''
-        
-        plt.plot(lam_new[n], flux_new[n], '.' )
-        plt.plot(lam_new[n], y)
-        plt.plot(lam_new[n], flux_new[n]-y, 'r', markersize=1)
-
-       
-        plt.plot(lam_new[n], y)
-        plt.fill_between(lam_new[n],  flux_new[n]-y,  flux_new[n]+y)
-        plt.show()
-        '''
-
-
-        #plt.title('For n*10th Entry')
-        #plt.ylabel('Flux')
-        #plt.xlabel('Lamda')
-        
-
-
     for i in r: 
         s = statistics.stdev(i)
         sigma.append(s)
@@ -83,12 +56,6 @@ def linear_error(spec_object):
 
 
 
-
-
-
-# ## Savitzky-Golay error
-
-
 def savitzky_golay(spec):
 
    
@@ -97,25 +64,31 @@ def savitzky_golay(spec):
     
   
     # Find residuals from smooth line
-
-    
-    smooth = mf.savgol_filter(y, 31, 3 )
+    smooth = mf.savgol_filter(y, 31, 3, deriv=0, delta=1.0, axis=- 1, mode='nearest', cval=0.0)
     resid = y - smooth
-    
-    
+
     # Calculate the variance 
-    
-    
     def moving_average(a, n=3) :
         ret = np.cumsum(a, dtype=float)
         ret[n:] = ret[n:] - ret[:-n]
         return ret[n - 1:] / n
     
     
-    
     mov_var = moving_average(resid**2, n=100)
     mov_var = np.concatenate((mov_var, [mov_var[-1]]* (resid.size-mov_var.size)))
     err_std = mov_var**(1/2)
- 
+    #print(err_std)
+    
+    for i in range(0, len(err_std)):
+        if err_std[i] ==0:
+            err_std[i] = 1e-50
+
+    #x = [i+1e-10 for i in x if i==0]
+    #err_std = [i+1e-10 for i in err_std if i==0]
+    #err_std= [Decimal(i) for i in err_std if i==0]
+    #for i in range(0,len(x)):
+    #    if i==0:
+    #        x[i] = 'nan'
+   
     return np.array([x,err_std]).T 
 
