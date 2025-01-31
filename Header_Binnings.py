@@ -40,15 +40,18 @@ def kill_header(file_name):
 
     lines = [i for i in lines if i]
 
-    lines = [i for i in lines if i[0].isalpha() == False and i[0] != '#' and i[0] != '%']
+    lines = [i for i in lines if i[0].isalpha() == False and i[0] != '#' and i[0] != '%' and i[0] != '@']
 
     lines = [i for i in lines if i[0] != '\n']
     
     lines = [s.strip('\n') for s in lines] # remove empty lines
     
     lines = [s.replace('\n', '') for s in lines]  #replace with nothing
+
+    #print(lines)
     
     
+
     columns = [] 
     
     for line in lines:
@@ -60,8 +63,20 @@ def kill_header(file_name):
     lam_floats  = [float(i) for i in columns[:,0]]
     flux_floats = [float(i) for i in columns[:,1]]
 
-    spectrum = np.array([lam_floats, flux_floats]).T
-    
+    #Check if lambda is in ascending order, reverse it if this is not the case
+
+    if lam_floats[0] > lam_floats[-1]:
+
+        lam_floats  = list(reversed(lam_floats))
+        flux_floats = list(reversed(flux_floats))
+
+        spectrum = np.array([lam_floats, flux_floats]).T
+
+    else: 
+
+        spectrum = np.array([lam_floats, flux_floats]).T
+
+
     return spectrum
 
 
