@@ -1,0 +1,15 @@
+README.md
+setup.py
+NGSF/.version
+NGSF/Header_Binnings.py
+NGSF/SF_functions.py
+NGSF/auxiliary.py
+NGSF/error_routines.py
+NGSF/get_metadata.py
+NGSF/params.py
+NGSF/sf_class.py
+NGSF.egg-info/PKG-INFO
+NGSF.egg-info/SOURCES.txt
+NGSF.egg-info/dependency_links.txt
+NGSF.egg-info/requires.txt
+NGSF.egg-info/top_level.txt
