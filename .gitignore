@@ -9,3 +9,18 @@ __pycache__/
 NGSF/tests/data/*.json
 *.egg-info/
 NGSF/.version
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# Jupyter autosaves
+.ipynb_checkpoints/
+
+# Template bank archive (download separately; see README)
+supyfit_bank.zip
+
+# Fit outputs
+*_binned.txt
+*_used.json
