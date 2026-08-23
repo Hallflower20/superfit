@@ -363,11 +363,24 @@ def core(
     # single-row astropy Table per result and stacking them cost more than
     # the chi2 it was reporting -- 11.6 ms against 9.7 ms per grid point on
     # the shipped bank, because each Table validates and converts 13 columns.
-    # Depends only on lam and extcon, both fixed for this call.
+    # Used only for the reported SN/host flux split. Note this reapplies the
+    # reddening to a model that already carries it, and evaluates the law at
+    # the observed rather than the rest wavelength -- both pre-existing, and
+    # both affecting only the Frac(SN)/Frac(gal) diagnostic, never the fit.
     extinction_at_lam = 10 ** (-0.4 * extcon * Alam(lam))
 
     redchi2 = []
-    all_tables = []
+    spectra = []
+    galaxies = []
+    supernovae = []
+    const_sn = []
+    const_gal = []
+    phases = []
+    bands = []
+    frac_sn = []
+    frac_gal = []
+    chi2_dof = []
+    chi2_dof2 = []
 
     for i in range(iterations):
 
@@ -377,82 +390,64 @@ def core(
         redchi2.append(rchi2)
 
         supernova_file = templates_sn_trunc[idx[1]]
-        host_galaxy_file = templates_gal_trunc[idx[0]]
-
-        host_galaxy_file = str(host_galaxy_file)
-        idxx = host_galaxy_file.rfind("/")
-        host_galaxy_file = host_galaxy_file[idxx + 1 :]
+        host_galaxy_file = str(templates_gal_trunc[idx[0]])
+        host_galaxy_file = host_galaxy_file[host_galaxy_file.rfind("/") + 1 :]
 
         bb = b[idx[0]][idx[1]]
-
         dd = d[idx[0]][idx[1]]
+
         sn_flux = sn[0, idx[1], :]
         gal_flux = gal[idx[0], 0, :]
-        sn_cont = bb * np.nanmean(sn_flux * extinction_at_lam)
-        gal_cont = dd * np.nanmean(gal_flux)
-        sum_cont = sn_cont + gal_cont
-        sn_cont = sn_cont / sum_cont
-        gal_cont = gal_cont / sum_cont
+        sn_contribution = bb * np.nanmean(sn_flux * extinction_at_lam)
+        gal_contribution = dd * np.nanmean(gal_flux)
+        total = sn_contribution + gal_contribution
 
         ii = supernova_file.rfind(":")
-        the_phase = supernova_file[ii + 1 : -1]
-        the_band = supernova_file[-1]
 
-        output = table.Table(
-            np.array(
-                [
-                    os.path.basename(name),
-                    host_galaxy_file,
-                    supernova_file,
-                    bb,
-                    dd,
-                    z,
-                    extcon,
-                    the_phase,
-                    the_band,
-                    sn_cont,
-                    gal_cont,
-                    reduchi2_once[idx],
-                    reduchi2[idx],
-                ]
-            ),
-            names=(
-                "SPECTRUM",
-                "GALAXY",
-                "SN",
-                "CONST_SN",
-                "CONST_GAL",
-                "Z",
-                "A_v",
-                "Phase",
-                "Band",
-                "Frac(SN)",
-                "Frac(gal)",
-                "CHI2/dof",
-                "CHI2/dof2",
-            ),
-            dtype=(
-                "S200",
-                "S200",
-                "S200",
-                "f",
-                "f",
-                "f",
-                "f",
-                "S200",
-                "S200",
-                "f",
-                "f",
-                "f",
-                "f",
-            ),
-        )
+        spectra.append(os.path.basename(name))
+        galaxies.append(host_galaxy_file)
+        supernovae.append(supernova_file)
+        const_sn.append(bb)
+        const_gal.append(dd)
+        phases.append(supernova_file[ii + 1 : -1])
+        bands.append(supernova_file[-1])
+        frac_sn.append(sn_contribution / total)
+        frac_gal.append(gal_contribution / total)
+        chi2_dof.append(reduchi2_once[idx])
+        chi2_dof2.append(reduchi2[idx])
 
-        all_tables.append(output)
-
-    # One vstack after the loop, not one per iteration -- rebuilding the whole
-    # table on every pass made this quadratic in `iterations`.
-    outputs = table.vstack(all_tables)
+    outputs = table.Table(
+        [
+            np.array(spectra, dtype="S200"),
+            np.array(galaxies, dtype="S200"),
+            np.array(supernovae, dtype="S200"),
+            np.array(const_sn, dtype="f"),
+            np.array(const_gal, dtype="f"),
+            np.full(iterations, z, dtype="f"),
+            np.full(iterations, extcon, dtype="f"),
+            np.array(phases, dtype="S200"),
+            np.array(bands, dtype="S200"),
+            np.array(frac_sn, dtype="f"),
+            np.array(frac_gal, dtype="f"),
+            np.array(chi2_dof, dtype="f"),
+            np.array(chi2_dof2, dtype="f"),
+        ],
+        names=(
+            "SPECTRUM",
+            "GALAXY",
+            "SN",
+            "CONST_SN",
+            "CONST_GAL",
+            "Z",
+            "A_v",
+            "Phase",
+            "Band",
+            "Frac(SN)",
+            "Frac(gal)",
+            "CHI2/dof",
+            "CHI2/dof2",
+        ),
+    )
 
     return outputs, redchi2
 
