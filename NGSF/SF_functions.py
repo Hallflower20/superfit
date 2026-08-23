@@ -16,6 +16,7 @@ from NGSF.get_metadata import Metadata
 from NGSF.error_routines import savitzky_golay, linear_error
 from NGSF.params import Parameters, data
 from NGSF.Header_Binnings import bin_spectrum_bank, mask_lines_bank, kill_header
+from NGSF.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
 
@@ -506,7 +507,7 @@ def all_parameter_space(
             a = all_bank_files[i]
 
             full_name = a[a.find("sne") :]
-            one_sn = "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/" + str(resolution) + "A/" + str(full_name)
+            one_sn = os.path.join(binning_dir(resolution), full_name)
 
             if parameters.mask_galaxy_lines == 1:
                 one_sn = np.loadtxt(one_sn)

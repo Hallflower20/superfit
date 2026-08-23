@@ -13,6 +13,7 @@ from NGSF.Header_Binnings import kill_header, kill_header_and_bin
 from NGSF.error_routines import linear_error, savitzky_golay
 from NGSF.get_metadata import Metadata
 from NGSF.params import Parameters, data
+from NGSF.paths import gal_dir, sne_dir
 
 
 parameters = Parameters(data)
@@ -265,8 +266,8 @@ class Superfit:
 
             int_obj = self.int_obj
 
-            sn_name = "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/10A/sne/" + subtype + "/" + sn_best_fullname
-            hg_name = "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/10A/gal/" + hg_name
+            sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
+            hg_name = os.path.join(gal_dir(10), hg_name)
 
             # print(sn_name)
 
@@ -367,8 +368,8 @@ class Superfit:
 
         int_obj = self.int_obj
 
-        sn_name = "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/10A/sne/" + subtype + "/" + sn_best_fullname
-        hg_name = "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/10A/gal/" + hg_name
+        sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
+        hg_name = os.path.join(gal_dir(10), hg_name)
 
         nova = kill_header(sn_name)
         nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])

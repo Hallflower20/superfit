@@ -1,11 +1,13 @@
 import glob
 import numpy as np
+import os
 import sys
 import json
 from sys import exit
 from astropy.table import Table
 from NGSF.auxiliary import select_templates
 from NGSF.Header_Binnings import kill_header
+from NGSF.paths import gal_dir, sne_dir
 
 
 
@@ -129,20 +131,15 @@ class Parameters:
         # Template library
 
         if self.resolution == 10 or self.resolution == 30:
-            templates_gal = glob.glob(
-                "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/" + str(self.resolution) + "A/gal/*"
-            )
+            templates_gal = glob.glob(os.path.join(gal_dir(self.resolution), "*"))
             templates_gal = [
                 x for x in templates_gal if "CVS" not in x and "README" not in x
             ]
             templates_gal = np.array(templates_gal)
 
             templates_sn = glob.glob(
-                "/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/" + str(self.resolution) + "A/sne/**/**/*"
+                os.path.join(sne_dir(self.resolution), "**", "**", "*")
             )
-
-            #print("/hildafs/home/xhall/GitHub/superfit/NGSF/bank/binnings/" + str(self.resolution) + "A/sne/**/**/*")
-            #print(templates_sn)
 
             templates_sn = [
                 x
@@ -155,13 +152,13 @@ class Parameters:
             templates_sn = np.array(templates_sn)
 
         else:
-            templates_gal = glob.glob("/hildafs/home/xhall/GitHub/superfit/NGSF/bank/original_resolution/gal/*")
+            templates_gal = glob.glob(os.path.join(gal_dir(), "*"))
             templates_gal = [
                 x for x in templates_gal if "CVS" not in x and "README" not in x
             ]
             templates_gal = np.array(templates_gal)
 
-            templates_sn = glob.glob("/hildafs/home/xhall/GitHub/superfit/NGSF/bank/original_resolution/sne/**/**/*")
+            templates_sn = glob.glob(os.path.join(sne_dir(), "**", "**", "*"))
             templates_sn = [
                 x
                 for x in templates_sn

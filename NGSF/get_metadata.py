@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import csv
 from NGSF.params import Parameters, data
+from NGSF.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
 def JD(mjd):
@@ -28,8 +29,7 @@ class Metadata(object):
 
         parameters = Parameters(data)
 
-        #mjd_max_brightness = glob.glob('**/mjd**')[0]
-        mjd_max_brightness = '/hildafs/home/xhall/GitHub/superfit/NGSF/mjd_of_maximum_brightness.csv'
+        mjd_max_brightness = MJD_MAX_BRIGHTNESS_CSV
 
 
 
@@ -45,7 +45,7 @@ class Metadata(object):
 
 
 
-        folders = ['/hildafs/home/xhall/GitHub/superfit/NGSF/bank/original_resolution/sne/'+ x for x in parameters.temp_sn_tr]
+        folders = [os.path.join(sne_dir(), x) for x in parameters.temp_sn_tr]
         have_wiserep=[]
         no_wiserep=[]
         z_dic={}
@@ -107,7 +107,7 @@ class Metadata(object):
 
                             short_path_dict[shorhand_dict[spec_file]]=spec_file
 
-                            dictionary_all_trunc_objects[spec_file] = '/hildafs/home/xhall/GitHub/superfit/NGSF/bank/original_resolution/sne/' + sn_type +'/'+ sub + '/' + spec_file
+                            dictionary_all_trunc_objects[spec_file] = os.path.join(sne_dir(), sn_type, sub, spec_file)
 
 
 
@@ -121,7 +121,7 @@ class Metadata(object):
 
                                 short_path_dict[shorhand_dict[spec_file]]=spec_file
 
-                                dictionary_all_trunc_objects[spec_file] = '/hildafs/home/xhall/GitHub/superfit/NGSF/bank/original_resolution/sne/' + sn_type +'/'+ sub + '/' + spec_file
+                                dictionary_all_trunc_objects[spec_file] = os.path.join(sne_dir(), sn_type, sub, spec_file)
 
 
 
