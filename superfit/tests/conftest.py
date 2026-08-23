@@ -100,9 +100,20 @@ def toy_fit_problem(rng):
     }
 
 
+EXAMPLE_PARAMETERS = os.path.join(REPO, "parameters.json")
+
+
 @pytest.fixture
 def base_parameters():
-    """The shipped parameters.json, as a plain dict."""
+    """The example parameters.json, as a plain dict.
 
-    with open(os.path.join(REPO, "parameters.json")) as fh:
+    Only present in a source checkout -- it is documentation, not part of
+    the installed package -- so tests using it skip when running against an
+    installed wheel.
+    """
+
+    if not os.path.isfile(EXAMPLE_PARAMETERS):
+        pytest.skip("parameters.json is only present in a source checkout")
+
+    with open(EXAMPLE_PARAMETERS) as fh:
         return json.load(fh)

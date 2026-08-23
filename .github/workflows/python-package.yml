@@ -1,55 +1,91 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+# Tests and packaging checks for superfit.
+#
+# The template bank is a 74 MB download and is not fetched here, so the
+# end-to-end tests marked `endtoend` skip themselves (see needs_bank in
+# superfit/tests/conftest.py). Everything else -- the fitting kernel against
+# its reference implementation, the error routines, Spectrum, config
+# validation -- runs without it.
 
-name: Unit Test NGSF
+name: Test superfit
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, master, sam-dev, xander-dev]
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.8, 3.9]
+        python-version: ["3.9", "3.11", "3.13"]
+
     steps:
-    - name: Checkout branch being tested
-      uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Get pip cache dir
-      id: pip-cache
-      run: |
-        python -m pip install --upgrade pip setuptools wheel
-        echo "::set-output name=dir::$(pip cache dir)"
-    - name: pip cache
-      uses: actions/cache@v2
-      with:
-        path: ${{ steps.pip-cache.outputs.dir }}
-        key: ${{ runner.os }}-pip-2-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-2-
-    - name: Install dependencies
-      run: |
-        python -m pip install pytest pytest-cov flake8
-        python -m pip install .
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude docs
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude docs,versioneer.py,NGSF/_version.py,NGSF/tests,NGSF/*/__init__.py
-    - name: Test with pytest
-      run: |
-        pytest
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v1
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test,speed]"
+
+      - name: Import without a template bank
+        # A fresh install must be importable before anyone downloads 74 MB.
+        run: python -c "import superfit; print(superfit.__version__)"
+
+      - name: Lint for real errors
+        run: |
+          python -m pip install flake8
+          flake8 superfit --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Test
+        env:
+          MPLBACKEND: Agg
+        run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check metadata
+        run: python -m twine check dist/*
+
+      - name: Refuse to ship the template bank
+        # The bank is gitignored, but a stray copy in a working tree would be
+        # swept into the sdist and rejected by PyPI. Fail loudly and early.
+        run: |
+          if tar tzf dist/*.tar.gz | grep -Ei 'bank/|supyfit_bank\.zip'; then
+            echo "::error::template bank leaked into the sdist"
+            exit 1
+          fi
+          echo "sdist is clean"
+
+      - name: Install the wheel in a clean environment and use it
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install --quiet dist/*.whl
+          cd /tmp
+          /tmp/fresh/bin/python -c "import superfit; print(superfit.__version__)"
+          /tmp/fresh/bin/superfit --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

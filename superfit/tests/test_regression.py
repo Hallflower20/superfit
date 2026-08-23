@@ -39,6 +39,31 @@ from superfit.tests.conftest import GOLDEN, REPO, TEST_SPECTRUM, needs_bank
 
 GOLDEN_CSV = os.path.join(GOLDEN, "SN2021urb_exact_z_10A.csv")
 
+# The configuration the golden file was produced with, stated here rather
+# than read from parameters.json. The golden result then cannot be
+# invalidated by someone editing the example config, and this test works
+# against an installed wheel, where parameters.json is not present.
+GOLDEN_CONFIG = {
+    "use_exact_z": 1,
+    "z_exact": 0.127,
+    "resolution": 10,
+    "lower_lam": 0,
+    "upper_lam": 0,
+    "error_spectrum": "sg",
+    "mask_galaxy_lines": 1,
+    "mask_telluric": 1,
+    "minimum_overlap": 0.7,
+    "epoch_low": 0,
+    "epoch_high": 0,
+    "Alam_low": -2,
+    "Alam_high": 2,
+    "Alam_interval": 0.2,
+    "iterations": 10,
+    "weighted_solve": 0,
+    "show_plot": 0,
+    "how_many_plots": 0,
+}
+
 # Columns that must match exactly -- these identify *which* template won.
 IDENTITY_COLUMNS = ["GALAXY", "SN", "Z", "A_v", "Phase", "Band"]
 
@@ -72,16 +97,18 @@ def run_pipeline(config, out_dir):
     env = dict(os.environ)
     env["MPLBACKEND"] = "Agg"
 
+    # Drive the installed entry point rather than run.py, so this works
+    # against a wheel as well as a checkout.
     proc = subprocess.run(
-        [sys.executable, os.path.join(REPO, "run.py"), config_path],
-        cwd=REPO,
+        [sys.executable, "-m", "superfit.cli", config_path],
+        cwd=out_dir,
         env=env,
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         raise AssertionError(
-            "run.py failed ({}):\n{}\n{}".format(
+            "superfit.cli failed ({}):\n{}\n{}".format(
                 proc.returncode, proc.stdout[-4000:], proc.stderr[-4000:]
             )
         )
@@ -95,12 +122,8 @@ def run_pipeline(config, out_dir):
 class TestGoldenResult:
     @pytest.fixture(scope="class")
     def results(self, tmp_path_factory):
-        import json
-
-        with open(os.path.join(REPO, "parameters.json")) as fh:
-            base = json.load(fh)
         out = str(tmp_path_factory.mktemp("regression"))
-        return run_pipeline(base, out)
+        return run_pipeline(GOLDEN_CONFIG, out)
 
     @pytest.fixture(scope="class")
     def golden(self):
@@ -159,15 +182,11 @@ class TestGoldenResult:
 def _regenerate():
     """Rewrite the golden file from a fresh run. Intentional changes only."""
 
-    import json
     import tempfile
 
-    with open(os.path.join(REPO, "parameters.json")) as fh:
-        base = json.load(fh)
-
-    tmp = tempfile.mkdtemp(prefix="ngsf-golden-")
+    tmp = tempfile.mkdtemp(prefix="superfit-golden-")
     try:
-        results = run_pipeline(base, tmp)
+        results = run_pipeline(GOLDEN_CONFIG, tmp)
         os.makedirs(GOLDEN, exist_ok=True)
         results.to_csv(GOLDEN_CSV, index=False)
         print("wrote {} ({} rows)".format(GOLDEN_CSV, len(results)))
