@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superfit"
+description = "Spectral classification of supernovae against a template bank"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dynamic = ["version"]
+
+authors = [
+    { name = "Samantha Goldwasser" },
+    { name = "Ofer Yaron", email = "ofer.yaron@weizmann.ac.il" },
+    { name = "Avner Sass" },
+    { name = "Ido Irani" },
+    { name = "Avishay Gal-Yam" },
+    { name = "D. Andrew Howell" },
+]
+
+keywords = [
+    "astronomy",
+    "supernova",
+    "spectroscopy",
+    "classification",
+    "transients",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+dependencies = [
+    "astropy",
+    "extinction",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "PyAstronomy",
+    "scipy",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# Lets worker processes stop contending over BLAS threads. The fit is
+# correct without it, just slower.
+speed = ["threadpoolctl"]
+test = ["pytest"]
+dev = ["pytest", "threadpoolctl", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/Hallflower20/superfit"
+Repository = "https://github.com/Hallflower20/superfit"
+Issues = "https://github.com/Hallflower20/superfit/issues"
+
+[project.scripts]
+superfit = "superfit.cli:main"
+
+[tool.setuptools]
+# Explicit, so the template bank and the test outputs can never be swept in.
+packages = ["superfit", "superfit.tests"]
+
+[tool.setuptools.dynamic]
+version = { attr = "superfit.__version__" }
+
+[tool.setuptools.package-data]
+superfit = ["mjd_of_maximum_brightness.csv"]
+"superfit.tests" = ["data/*.flm", "golden/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["superfit/tests"]
+markers = [
+    "endtoend: runs the full fit over the template bank (tens of seconds)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

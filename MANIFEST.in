@@ -1,0 +1,13 @@
+include README.md
+include requirements.txt
+include parameters.json
+recursive-include superfit/tests/data *.flm
+recursive-include superfit/tests/golden *.csv
+
+# Never ship the template bank: it is a 74 MB download, not source.
+exclude supyfit_bank.zip
+recursive-exclude bank *
+prune bank
+prune build
+prune dist
+global-exclude *.pyc __pycache__ .ipynb_checkpoints
