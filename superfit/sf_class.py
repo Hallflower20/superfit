@@ -8,105 +8,152 @@ from scipy.ndimage import gaussian_filter1d
 from astropy.table import Table
 
 
-from NGSF.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
-from NGSF.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
-from NGSF.error_routines import linear_error, savitzky_golay
-from NGSF.get_metadata import get_metadata
-from NGSF.params import parameters, get_parameters, set_config
-from NGSF.paths import gal_dir, sne_dir
+from superfit.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
+from superfit.config import ConfigError, load_config
+from superfit.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
+from superfit.error_routines import linear_error, savitzky_golay
+from superfit.get_metadata import get_metadata
+from superfit.params import parameters, get_parameters, set_config
+from superfit.paths import gal_dir, sne_dir
+from superfit.spectrum import Spectrum
 
+
+
+def _looks_like_config(value):
+    """True when a first positional argument is a configuration, not a spectrum.
+
+    A dict is unambiguous. A string is a config if it parses as JSON or ends
+    in .json; anything else is treated as a path to a spectrum.
+    """
+
+    if isinstance(value, dict):
+        return True
+    if isinstance(value, str):
+        if value.strip().startswith("{"):
+            return True
+        return value.lower().endswith(".json")
+    return False
 
 
 class Superfit:
-    def __init__(self, config=None):
-        """Set up a fit.
+    """One fit of one observed spectrum against the template bank.
 
-        Parameters
-        ----------
-        config : dict, str or None
-            A parameter dict, a JSON string, or a path to a JSON file. When
-            omitted the configuration already loaded into :mod:`NGSF.params`
-            is used -- which is what happens for ``python run.py params.json``.
-        """
+    The observation can be supplied in whatever form it is already in::
 
-        if config is not None:
-            set_config(config)
+        Superfit(wavelength=lam, flux=flux, error=err, z=0.127)
+        Superfit(Spectrum.from_file("SN2021urb.flm"), z=0.127)
+        Superfit("SN2021urb.flm", z=0.127)
+        Superfit(numpy_array_of_shape_n_by_3, z=0.127)
 
-        self.original_path_name = parameters.object_to_fit
-        self.name = os.path.basename(self.original_path_name)
-        self.name_no_extension = self.name[: self.name.rfind(".")]
+    and the configuration as a dict, a JSON string, a path to a JSON file,
+    or simply as keyword arguments::
 
-        self.spectrum = kill_header(self.original_path_name)
+        Superfit(spectrum, config="parameters.json")
+        Superfit(spectrum, config={"resolution": 30}, z=0.127)
+        Superfit("parameters.json")     # legacy: config only, spectrum named in it
 
-        obj_original_res = self.spectrum[:, 0][-1] - self.spectrum[:, 0][-2]
+    Anything not specified takes its value from
+    :data:`superfit.config.DEFAULT_CONFIG`.
+    """
 
-        how_many_bins = 0
+    def __init__(
+        self,
+        spectrum=None,
+        config=None,
+        wavelength=None,
+        flux=None,
+        error=None,
+        name=None,
+        **overrides
+    ):
+        # `Superfit(config_dict)` and `Superfit("parameters.json")` predate
+        # the spectrum argument and still mean the config.
+        if config is None and _looks_like_config(spectrum):
+            config, spectrum = spectrum, None
 
-        if obj_original_res > 10:
-            how_many_bins = +(self.spectrum[:, 0][-1] - self.spectrum[:, 0][0]) / 30
-
-        elif obj_original_res <= 10:
-            how_many_bins = +(self.spectrum[:, 0][-1] - self.spectrum[:, 0][0]) / 10
-
-        # Check if spectrum is short
-
-        if how_many_bins < 35:
-            raise TypeError("This spectrum is too short to fit!")
-
-        self.lamda, self.flux = self.spectrum[:, 0], self.spectrum[:, 1]
-
-        self.binned_name = (
-            parameters.save_results_path + self.name_no_extension + "_binned.txt"
+        spectrum = self._resolve_spectrum(
+            spectrum, wavelength=wavelength, flux=flux, error=error, name=name
         )
-        self.results_name = parameters.save_results_path + self.name_no_extension
 
+        merged = load_config(config, **overrides)
+        if spectrum is None:
+            if not merged["object_to_fit"]:
+                raise ConfigError(
+                    "No spectrum to fit. Pass a Spectrum, a file path, or "
+                    "wavelength= and flux= arrays, or set 'object_to_fit' in "
+                    "the configuration."
+                )
+            spectrum = Spectrum.from_file(merged["object_to_fit"])
+        elif not merged["object_to_fit"]:
+            # Recorded in *_used.json so the run stays self-describing.
+            merged["object_to_fit"] = spectrum.name
+
+        set_config(merged, spectrum=spectrum)
+
+        self.observation = spectrum.check_long_enough(parameters.resolution)
+
+        self.name = spectrum.name
+        self.name_no_extension = spectrum.name
+        self.original_path_name = merged["object_to_fit"]
+
+        self.lamda = spectrum.wavelength
+        self.flux = spectrum.flux
+        self.spectrum = spectrum.as_array()
+
+        prefix = parameters.save_results_path
+        self.binned_name = prefix + self.name_no_extension + "_binned.txt"
+        self.results_name = prefix + self.name_no_extension
         self.results_path = self.results_name + ".csv"
 
-        if parameters.mask_galaxy_lines == 1 and parameters.mask_telluric == 1:
-            object_spec = mask_gal_lines(self.spectrum, parameters.redshift)
-            object_spec = remove_telluric(object_spec)
-        elif parameters.mask_galaxy_lines == 1 and parameters.mask_telluric == 0:
-            object_spec = mask_gal_lines(self.spectrum, parameters.redshift)
-        elif parameters.mask_galaxy_lines == 0 and parameters.mask_telluric == 1:
-            if("csv" in self.original_path_name):
-                file = Table.read(self.original_path_name, format='csv')
+        # What the chi2 is measured against: masked, normalised, resampled.
+        masked = spectrum
+        if parameters.mask_galaxy_lines:
+            masked = masked.without_host_lines(parameters.redshift)
+        if parameters.mask_telluric:
+            masked = masked.without_telluric()
 
-                lam_floats = file["wavelength"].data
-                flux_floats = file["flux"].data
-                fluxerr_floats = file["fluxerr"].data
+        self.masked = masked.normalised()
+        self.int_obj = self.masked.interpolated_onto(parameters.lam)
 
-                object_spec = np.array([lam_floats, flux_floats, fluxerr_floats]).T
-            else:
-                object_spec = np.loadtxt(self.original_path_name)
-
-            object_spec = remove_telluric(object_spec)
-        elif parameters.mask_galaxy_lines == 0 and parameters.mask_telluric == 0:
-            if("csv" in self.original_path_name):
-                file = Table.read(self.original_path_name, format='csv')
-
-                lam_floats = file["wavelength"].data
-                flux_floats = file["flux"].data
-                fluxerr_floats = file["fluxerr"].data
-
-                object_spec = np.array([lam_floats, flux_floats, fluxerr_floats]).T
-            else:
-                object_spec = np.loadtxt(self.original_path_name)
-
-        object_spec[:, 1] = normalise_flux(object_spec[:, 1])
-
-        int_obj = interpolate.interp1d(
-            object_spec[:, 0], object_spec[:, 1], bounds_error=False, fill_value="nan"
-        )
-        self.int_obj = int_obj(parameters.lam)
+        # The error spectrum is measured on the binned, *unmasked* observation.
+        self.binned = spectrum.binned(parameters.resolution)
 
         self.metadata = get_metadata()
 
-        # Make json with the used parameters
+        self._write_used_config()
+
+    @staticmethod
+    def _resolve_spectrum(spectrum, wavelength, flux, error, name):
+        """Turn whichever of the input forms was used into a Spectrum."""
+
+        if wavelength is not None or flux is not None:
+            if spectrum is not None:
+                raise TypeError(
+                    "Pass either a spectrum or wavelength=/flux= arrays, not both."
+                )
+            if wavelength is None or flux is None:
+                raise TypeError(
+                    "wavelength= and flux= must be given together."
+                )
+            return Spectrum(wavelength, flux, error=error, name=name)
+
+        if spectrum is None:
+            return None
+
+        return Spectrum.coerce(spectrum, name=name)
+
+    def _write_used_config(self):
+        """Record the effective configuration next to the results."""
+
         used_json = parameters.save_results_path + "{}_used.json".format(
             self.name_no_extension
         )
-        with open(used_json, "w") as fp:
-            json.dump(parameters.config, fp, indent=2)
+        try:
+            with open(used_json, "w") as handle:
+                json.dump(parameters.config, handle, indent=2, default=str)
+        except OSError as exc:
+            # Not being able to write the audit file should not lose the fit.
+            print("WARNING: could not write {}: {}".format(used_json, exc))
 
     def plot(self):
 
@@ -210,19 +257,30 @@ class Superfit:
         )
         plt.legend(framealpha=1, frameon=True, fontsize=12)
 
-    def superfit(self):
+    def run(self, save_binned=True):
+        """Fit the spectrum and return the ranked results.
+
+        Parameters
+        ----------
+        save_binned : bool
+            Also write the binned observation next to the results. It is an
+            intermediate, kept because it is useful to inspect; the fit no
+            longer reads it back.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per surviving template, best match first.
+        """
 
         print(
-            "Running optimization for spectrum file: {0} with resolution = {1} Å".format(
+            "Running optimization for spectrum: {0} with resolution = {1} Å".format(
                 self.name_no_extension, parameters.resolution
             )
         )
 
-        kill_header_and_bin(
-            self.original_path_name,
-            parameters.resolution,
-            save_bin=self.binned_name,
-        )
+        if save_binned:
+            self._write_binned()
 
         all_parameter_space(
             self.int_obj,
@@ -234,7 +292,8 @@ class Superfit:
             parameters.resolution,
             parameters.iterations,
             kind=parameters.kind,
-            original=self.binned_name,
+            original=self.binned,
+            spectrum_name=self.name,
             save=self.results_name,
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
@@ -243,6 +302,27 @@ class Superfit:
         )
 
         self.results = pd.read_csv(self.results_path)
+        self._plot_best_fits()
+        return self.results
+
+    def _write_binned(self):
+        """Save the binned observation as two columns of text."""
+
+        try:
+            np.savetxt(
+                self.binned_name,
+                np.column_stack([self.binned.wavelength, self.binned.flux]),
+                fmt="%s",
+            )
+        except OSError as exc:
+            print("WARNING: could not write {}: {}".format(self.binned_name, exc))
+
+    def superfit(self):
+        """Backwards-compatible alias for :meth:`run`."""
+
+        return self.run()
+
+    def _plot_best_fits(self):
 
         result_number = 0
 
@@ -349,14 +429,9 @@ class Superfit:
             if parameters.show == 1:
                 plt.show()
 
-    def results(self):
-
-        if os.path.isfile(self.results_path):
-            results = self.results
-        else:
-            raise Exception("Do the superfit! <( @_@" ")> ")
-
-        return results
+    # NOTE: there is no results() method. `run()` assigns self.results, which
+    # would shadow any method of that name anyway; the old one was
+    # unreachable and returned itself.
 
     def any_result(self, j):
 

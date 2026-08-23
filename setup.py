@@ -44,7 +44,7 @@ def write_version_file(version):
 
     version_file = ".version"
     if os.path.isfile(version_file) is False:
-        with open("NGSF/" + version_file, "w+") as f:
+        with open("superfit/" + version_file, "w+") as f:
             f.write("{}: {}".format(version, git_status))
 
     return version_file
@@ -86,7 +86,7 @@ version_file = write_version_file(VERSION)
 long_description = get_long_description()
 
 setup(
-    name="NGSF",
+    name="superfit",
     description="Next Generation SuperFit in Python",
     long_description=long_description,
     long_description_content_type="text/x-rst",
@@ -96,15 +96,15 @@ setup(
     license="MIT",
     version=VERSION,
     packages=[
-        "NGSF",
+        "superfit",
     ],
-    package_dir={"NGSF": "NGSF"},
+    package_dir={"superfit": "superfit"},
     package_data={
-        "NGSF": [version_file, "mjd_of_maximum_brightness.csv"],
+        "superfit": [version_file, "mjd_of_maximum_brightness.csv"],
     },
     entry_points={
         "console_scripts": [
-            "superfit = NGSF.cli:main",
+            "superfit = superfit.cli:main",
         ],
     },
     python_requires=">=3.7",

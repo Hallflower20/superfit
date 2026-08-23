@@ -1,4 +1,4 @@
-"""Shared fixtures for the NGSF test suite.
+"""Shared fixtures for the superfit test suite.
 
 The numerical-kernel tests deliberately avoid the template bank so that they
 run anywhere in a second or two. Only the end-to-end regression test needs
@@ -22,20 +22,21 @@ TEST_SPECTRUM = os.path.join(
 
 
 def bank_is_available():
-    """True when a template bank can be resolved without raising."""
+    """True when a template bank with both layouts can be resolved."""
 
     try:
-        from NGSF import paths
+        from superfit import paths
+
+        return os.path.isdir(paths.original_resolution_dir()) and os.path.isdir(
+            paths.binnings_dir()
+        )
     except Exception:
         return False
-    return os.path.isdir(paths.ORIGINAL_RESOLUTION_DIR) and os.path.isdir(
-        paths.BINNINGS_DIR
-    )
 
 
 needs_bank = pytest.mark.skipif(
     not bank_is_available(),
-    reason="template bank not found; set NGSF_BANK_DIR or unzip supyfit_bank.zip",
+    reason="template bank not found; set SUPERFIT_BANK_DIR or unzip supyfit_bank.zip",
 )
 
 

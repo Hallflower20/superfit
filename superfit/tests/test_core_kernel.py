@@ -16,7 +16,7 @@ which is exactly the signal we want.
 import numpy as np
 import pytest
 
-from NGSF.SF_functions import sn_hg_arrays, solve_grid
+from superfit.SF_functions import sn_hg_arrays, solve_grid
 
 
 def reference_solution(int_obj, sn, gal, sigma, minimum_overlap=0.7):

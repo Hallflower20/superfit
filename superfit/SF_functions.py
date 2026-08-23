@@ -12,17 +12,17 @@ from PyAstronomy import pyasl
 import multiprocessing as mp
 from tqdm import tqdm
 
-from NGSF.get_metadata import get_metadata
-from NGSF.error_routines import savitzky_golay, linear_error
-from NGSF.params import parameters
-from NGSF.Header_Binnings import (
+from superfit.get_metadata import get_metadata
+from superfit.error_routines import savitzky_golay, linear_error
+from superfit.params import parameters
+from superfit.Header_Binnings import (
     bin_spectrum_bank,
     kill_header,
     mask_host_lines,
     mask_lines_bank,
     normalise_flux,
 )
-from NGSF.paths import binning_dir
+from superfit.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
 
@@ -122,70 +122,57 @@ def Alam(lamin, A_v=1, R_v=3.1):
 def error_obj(kind, lam, object_to_fit):
 
     """
-    This function gives an error based on user input. The error can be obtained by either a Savitzky-Golay filter,
-
-    a linear error approximation or it can come with the file itself.
-
+    Per-pixel uncertainty for the observation, resampled onto ``lam``.
 
     parameters
     ----------
 
-    It takes a "kind" of error (linear, SG or included), a lambda range and an object whose error we want to obtain
+    kind: "sg" (Savitzky-Golay), "linear", or "included" to use an error
+        column supplied with the observation.
+    lam: the wavelength grid the fit runs on.
+    object_to_fit: a Spectrum, a path to one, or an (n, 2+) array.
 
     returns
     -------
 
-    Error.
+    Error, one value per element of ``lam``, NaN outside the observation.
 
     """
-    #print(object_to_fit)
-    if("csv" in object_to_fit):
-        file = Table.read(object_to_fit, format='csv')
-        print(file)
 
-        lam_floats = file["wavelength"].data
-        flux_floats = file["flux"].data
-        fluxerr_floats = file["fluxerr"].data
+    from superfit.spectrum import Spectrum
 
-        object_spec = np.array([lam_floats, flux_floats, fluxerr_floats]).T
-    else:
-        object_spec = np.loadtxt(object_to_fit)
-    
-    object_spec[:, 1] = normalise_flux(object_spec[:, 1])
+    spectrum = Spectrum.coerce(object_to_fit)
 
-    #print(kind)
-    #print(len(object_spec[1, :]))
-    #print(kind == "included" and len(object_spec[1, :]) > 2)
-    if kind == "included" and len(object_spec[1, :]) > 2:
+    # Median-normalise so the error is on the same scale as the flux the
+    # chi2 sees. Already-normalised input is unaffected.
+    object_spec = spectrum.normalised().as_array()
 
-        error = object_spec[:, 2]
+    if kind == "included":
+        if object_spec.shape[1] < 3:
+            raise ValueError(
+                "error_spectrum='included' needs an uncertainty column, but "
+                "{!r} has only wavelength and flux. Use 'sg' or 'linear', or "
+                "supply error= when building the Spectrum.".format(spectrum.name)
+            )
+        error = np.column_stack([object_spec[:, 0], object_spec[:, 2]])
 
-        object_err_interp = interpolate.interp1d(
-            object_spec[:, 0], error, bounds_error=False, fill_value="nan"
-        )
-
-        sigma = object_err_interp(lam)
     elif kind == "linear":
-
         error = linear_error(object_spec)
 
-        object_err_interp = interpolate.interp1d(
-            error[:, 0], error[:, 1], bounds_error=False, fill_value="nan"
-        )
-
-        sigma = object_err_interp(lam)
-
     elif kind == "sg":
-
         error = savitzky_golay(object_spec)
 
-        object_err_interp = interpolate.interp1d(
-            error[:, 0], error[:, 1], bounds_error=False, fill_value="nan"
+    else:
+        raise ValueError(
+            "Unknown error_spectrum {!r}; expected 'sg', 'linear' or "
+            "'included'.".format(kind)
         )
 
-        sigma = object_err_interp(lam)
+    object_err_interp = interpolate.interp1d(
+        error[:, 0], error[:, 1], bounds_error=False, fill_value=np.nan
+    )
 
-    return sigma
+    return object_err_interp(lam)
 
 
 def solve_grid(sn, gal, int_obj, sigma, weighted=False):
@@ -367,7 +354,11 @@ def core(
     original = kwargs["original"]
     minimum_overlap = kwargs["minimum_overlap"]
 
-    name = os.path.basename(original)
+    # What goes in the SPECTRUM column. Falls back to the filename when the
+    # observation came from disk and no name was given.
+    name = kwargs.get("spectrum_name")
+    if name is None:
+        name = os.path.basename(original) if isinstance(original, str) else "spectrum"
 
     # sigma depends only on the observed spectrum, not on (z, A_v), so the
     # caller computes it once for the whole grid and passes it in. Recomputing
@@ -650,7 +641,7 @@ def all_parameter_space(
 
     metadata = get_metadata()
 
-    print("NGSF started")
+    print("superfit started")
     #print(len(templates_sn_trunc))
     start = time.time()
 

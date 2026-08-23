@@ -6,7 +6,7 @@ results
 __pycache__/
 *.pyc
 .pytest_cache/
-NGSF/tests/data/*.json
+superfit/tests/data/*.json
 *.egg-info/
 NGSF/.version
 

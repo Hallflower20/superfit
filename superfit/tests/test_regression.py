@@ -17,7 +17,7 @@ Three levels of strictness, so a failure says *what* changed:
 Regenerate the golden file only when a change to the science is intended,
 and say so in the commit message:
 
-    python NGSF/tests/test_regression.py --regenerate
+    python superfit/tests/test_regression.py --regenerate
 """
 
 import os
@@ -30,12 +30,12 @@ import pandas as pd
 import pytest
 
 if __name__ == "__main__" and __package__ is None:
-    # Allow `python NGSF/tests/test_regression.py --regenerate` from anywhere.
+    # Allow `python superfit/tests/test_regression.py --regenerate` from anywhere.
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 
-from NGSF.tests.conftest import GOLDEN, REPO, TEST_SPECTRUM, needs_bank
+from superfit.tests.conftest import GOLDEN, REPO, TEST_SPECTRUM, needs_bank
 
 GOLDEN_CSV = os.path.join(GOLDEN, "SN2021urb_exact_z_10A.csv")
 

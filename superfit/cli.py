@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Command-line entry point for NGSF.
+"""Command-line entry point for superfit.
 
 Installed as the ``superfit`` command; also reachable as ``python run.py``
 from a source checkout.
@@ -15,7 +15,7 @@ import sys
 def build_parser(prog="superfit"):
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Fit a supernova spectrum against the NGSF template bank.",
+        description="Fit a supernova spectrum against the superfit template bank.",
     )
     parser.add_argument(
         "config",
@@ -85,14 +85,21 @@ def apply_overrides(config, args):
 def main(argv=None, prog="superfit"):
     args = build_parser(prog).parse_args(argv)
 
-    from NGSF.params import load_config
+    from superfit.config import ConfigError, read_config
 
-    config = apply_overrides(load_config(args.config), args)
+    try:
+        config = apply_overrides(read_config(args.config), args)
+    except ConfigError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
 
-    from NGSF.sf_class import Superfit
+    from superfit.sf_class import Superfit
 
-    supernova = Superfit(config)
-    supernova.superfit()
+    try:
+        Superfit(config=config).run()
+    except (ConfigError, FileNotFoundError, ValueError) as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
     return 0
 
 

@@ -3,8 +3,8 @@ import numpy as np
 import os
 import pandas as pd
 import csv
-from NGSF.params import get_parameters
-from NGSF.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
+from superfit.params import get_parameters
+from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
 def JD(mjd):

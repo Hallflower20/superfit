@@ -4,74 +4,36 @@ import os
 import sys
 import json
 from astropy.table import Table
-from NGSF.auxiliary import select_templates
-from NGSF.Header_Binnings import kill_header
-from NGSF.paths import gal_dir, sne_dir
+from superfit import config as config_module
+from superfit.auxiliary import select_templates
+from superfit.paths import gal_dir, sne_dir
 
 
-def parseJsonString(myjson):
-    """
-    Check if JSON string
-    return JSON or False
-    """
-    try:
-        json.loads(myjson)
-    except (ValueError, TypeError):
-        return False
-    return json.loads(myjson)
+# Configuration reading and defaulting live in superfit.config; these names
+# are kept here because older code imports them from this module.
+parseJsonString = config_module.parse_json_string
+parseJsonFile = config_module.parse_json_file
+load_config = config_module.load_config
 
 
-def parseJsonFile(file):
-    """
-    Check if JSON file
-    return JSON or False
-
-    """
-    try:
-        with open(file, "r") as read_file:
-            return json.load(read_file)
-    except Exception:
-        return False
-
-
-def load_config(source):
-    """Read a configuration from a dict, a JSON string, or a path to a JSON file.
-
-    Raises ValueError naming the source when it is none of those, rather than
-    printing and killing the interpreter.
-    """
-
-    if isinstance(source, dict):
-        return source
-
-    parsed = parseJsonString(source)
-    if parsed:
-        return parsed
-
-    parsed = parseJsonFile(source)
-    if parsed:
-        return parsed
-
-    raise ValueError(
-        "Could not read NGSF parameters from {!r}. Expected a dict, a JSON "
-        "string, or a path to a JSON file.".format(source)
-    )
-
-
-# The active configuration. Importing NGSF must never require command-line
+# The active configuration. Importing superfit must never require command-line
 # arguments -- that made the package impossible to use from a notebook, from
 # another script, or from a test. A configuration given on argv is still
 # picked up automatically so `python run.py parameters.json` keeps working.
 data = None
 _cached_parameters = None
+# The spectrum the active configuration refers to, when it was supplied as
+# arrays rather than as a path for Parameters to go and read.
+_active_spectrum = None
 
 
-def set_config(source):
+def set_config(source, spectrum=None):
     """Install ``source`` as the active configuration and return it."""
 
-    global data, _cached_parameters
+    global data, _cached_parameters, _active_spectrum
     data = load_config(source)
     _cached_parameters = None
+    _active_spectrum = spectrum
     return data
 
 
@@ -87,11 +49,11 @@ def get_parameters():
     if _cached_parameters is None:
         if data is None:
             raise RuntimeError(
-                "No NGSF parameters loaded. Call NGSF.params.set_config(...) "
+                "No superfit parameters loaded. Call superfit.params.set_config(...) "
                 "with a dict or a path to a JSON file, pass one on the command "
                 "line, or use the Superfit(config=...) argument."
             )
-        _cached_parameters = Parameters(data)
+        _cached_parameters = Parameters(data, spectrum=_active_spectrum)
     return _cached_parameters
 
 
@@ -108,8 +70,8 @@ class _LazyParameters:
 
     def __repr__(self):
         if data is None or _cached_parameters is None:
-            return "<NGSF parameters: not loaded>"
-        return "<NGSF parameters for {}>".format(_cached_parameters.object_to_fit)
+            return "<superfit parameters: not loaded>"
+        return "<superfit parameters for {}>".format(_cached_parameters.object_to_fit)
 
 
 parameters = _LazyParameters()
@@ -119,14 +81,28 @@ if len(sys.argv) > 1:
     try:
         set_config(sys.argv[1])
     except ValueError:
-        # argv[1] is not an NGSF config -- e.g. pytest arguments. Stay unloaded.
+        # argv[1] is not a superfit config -- e.g. pytest arguments. Stay unloaded.
         pass
 
 
 class Parameters:
-    def __init__(self, data):
+    def __init__(self, data, spectrum=None):
+        """Derived quantities for one fit.
 
-        # Keep the raw config so it can be echoed back into *_used.json.
+        Parameters
+        ----------
+        data : dict
+            A configuration; missing keys are filled from DEFAULT_CONFIG.
+        spectrum : Spectrum, optional
+            The observation being fitted. Only needed when the wavelength
+            grid is to be derived from it (``lower_lam == upper_lam``); it
+            saves reading the file again, and it is the only way to fit a
+            spectrum that never existed as a file.
+        """
+
+        data = config_module.load_config(data)
+
+        # Keep the merged config so it can be echoed back into *_used.json.
         self.config = data
 
         self.object_to_fit = data["object_to_fit"]
@@ -177,10 +153,14 @@ class Parameters:
 
         if self.upper == self.lower:
 
-            # One read, not two: kill_header parses the whole file each call.
-            spectrum = kill_header(self.object_to_fit)
-            self.lower = spectrum[1][0] - 300
-            self.upper = spectrum[-1][0] + 300
+            wavelength = self._observed_wavelength(spectrum)
+
+            # Historical: the grid starts from the SECOND sample, not the
+            # first. Preserved deliberately -- it shifts the start by one
+            # pixel, which the 300 A padding swamps, but changing it would
+            # move lam and so every chi2 in the output.
+            self.lower = wavelength[1] - 300
+            self.upper = wavelength[-1] + 300
 
             interval = int((self.upper - self.lower) / self.resolution)
             self.lam = np.linspace(self.lower, self.upper, interval)
@@ -263,3 +243,21 @@ class Parameters:
 
         self.templates_sn_trunc = select_templates(templates_sn, self.temp_sn_tr)
         self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
+
+    def _observed_wavelength(self, spectrum):
+        """The observed wavelength axis, from the Spectrum or from the file."""
+
+        if spectrum is not None:
+            return np.asarray(spectrum.wavelength, dtype=float)
+
+        if not self.object_to_fit:
+            raise config_module.ConfigError(
+                "The wavelength grid is derived from the observation "
+                "(lower_lam == upper_lam), but no spectrum was supplied and "
+                "'object_to_fit' is unset. Pass a spectrum, or set "
+                "lower_lam/upper_lam explicitly."
+            )
+
+        from superfit.spectrum import Spectrum
+
+        return Spectrum.from_file(self.object_to_fit).wavelength

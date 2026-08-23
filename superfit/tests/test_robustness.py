@@ -14,14 +14,14 @@ import warnings
 import numpy as np
 import pytest
 
-from NGSF.error_routines import (
+from superfit.error_routines import (
     apply_error_floor,
     linear_error,
     robust_scale,
     savitzky_golay,
 )
-from NGSF.Header_Binnings import bin_spectrum, bin_spectrum_bank, normalise_flux
-from NGSF.SF_functions import remove_telluric
+from superfit.Header_Binnings import bin_spectrum, bin_spectrum_bank, normalise_flux
+from superfit.SF_functions import remove_telluric
 
 
 def spike(spectrum, index, height):
@@ -364,7 +364,7 @@ class TestGridEdgeWarnings:
         return table.Table({"A_v": list(a_v_values), "Z": list(z_values)})
 
     def test_warns_when_extinction_pins_to_the_lower_edge(self):
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
 
         grid = np.linspace(-2.0, 2.0, 21)
         result = self._table([-2.0, 0.4, 1.0])
@@ -375,7 +375,7 @@ class TestGridEdgeWarnings:
         assert "A_v" in messages[0] and "lower edge" in messages[0]
 
     def test_warns_when_extinction_pins_to_the_upper_edge(self):
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
 
         grid = np.linspace(-2.0, 2.0, 21)
         result = self._table([2.0, 0.4, 1.0])
@@ -386,7 +386,7 @@ class TestGridEdgeWarnings:
         assert "upper edge" in messages[0]
 
     def test_silent_when_the_fit_is_interior(self):
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
 
         grid = np.linspace(-2.0, 2.0, 21)
         result = self._table([0.4, -0.8, 1.2])
@@ -394,7 +394,7 @@ class TestGridEdgeWarnings:
         assert grid_edge_warnings(result, np.array([0.1]), grid) == []
 
     def test_warns_on_a_redshift_at_the_edge_of_a_scan(self):
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
 
         z_grid = np.linspace(0.0, 0.2, 21)
         result = self._table([0.4, 0.4], z_values=[0.2, 0.1])
@@ -406,7 +406,7 @@ class TestGridEdgeWarnings:
     def test_single_valued_grid_is_not_an_edge(self):
         """An exact-z run has one redshift; that is a choice, not a boundary."""
 
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
 
         result = self._table([0.4], z_values=[0.127])
 
@@ -417,7 +417,7 @@ class TestGridEdgeWarnings:
         assert not any("Z" in m for m in messages)
 
     def test_empty_result_is_handled(self):
-        from NGSF.SF_functions import grid_edge_warnings
+        from superfit.SF_functions import grid_edge_warnings
         from astropy import table
 
         empty = table.Table({"A_v": [], "Z": []})
