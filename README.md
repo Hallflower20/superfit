@@ -15,6 +15,42 @@ Superfit in python is a software for the spectral classification of Supernovae o
 Optional: `threadpoolctl`, which lets NGSF stop worker processes from
 contending over BLAS threads. Without it the fit is correct, just slower.
 
+The code is tested on both an older stack (numpy 1.24, scipy 1.8, astropy
+5.2, pandas 1.5) and a current one (numpy 2.5, scipy 1.18, astropy 8.0,
+pandas 3.0), and produces byte-identical results on either.
+
+### Building an environment
+
+A self-contained virtualenv, which keeps NGSF's dependencies out of your
+user site-packages (`~/.local`) where they can collide with other projects:
+
+    python -m venv /path/to/envs/superfit        # NOT --system-site-packages
+    source /path/to/envs/superfit/bin/activate
+    pip install -r requirements.txt pytest
+    pip install -e /path/to/superfit             # editable: `superfit` on PATH
+
+Building *without* `--system-site-packages` is deliberate. A venv that
+inherits the system packages also picks up `~/.local`, and a stale package
+there shadows the system one — the usual symptom is an import error from
+inside matplotlib that has nothing to do with your code.
+
+### On NERSC (Perlmutter)
+
+An environment built this way lives at
+
+    /global/cfs/cdirs/desicollab/users/xhall/envs/superfit
+
+Activate and go, from any working directory:
+
+    source /global/cfs/cdirs/desicollab/users/xhall/envs/superfit/bin/activate
+    superfit /path/to/parameters.json
+
+It is an editable install of the checkout at
+`/global/cfs/cdirs/desicollab/users/xhall/GitHub/superfit`, so the template
+bank is found automatically and `git pull` takes effect without reinstalling.
+Moving or renaming that checkout breaks the link; re-run `pip install -e .`
+if you do.
+
 
 # To run one object
 The user must make sure to have a template bank to look at. The new template bank can be downloaded from WISeREP [here](https://www.wiserep.org/content/wiserep-getting-started#supyfit).
@@ -35,12 +71,14 @@ later with a confusing file-not-found.
 
 ### Command line
 
-    python run.py parameters.json
+    superfit parameters.json          # installed entry point
+    python run.py parameters.json     # equivalent, from a source checkout
 
 Anything in the JSON can be overridden per-run without editing the file:
 
-    python run.py parameters.json --object spectrum.flm --out results/ --no-plots
-    python run.py parameters.json --resolution 30
+    superfit parameters.json --object spectrum.flm --out results/ --no-plots
+    superfit parameters.json --resolution 30
+    superfit parameters.json --n-cores 16 --weighted-solve
 
 ### From Python
 

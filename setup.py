@@ -100,7 +100,12 @@ setup(
     ],
     package_dir={"NGSF": "NGSF"},
     package_data={
-        "NGSF": [version_file],
+        "NGSF": [version_file, "mjd_of_maximum_brightness.csv"],
+    },
+    entry_points={
+        "console_scripts": [
+            "superfit = NGSF.cli:main",
+        ],
     },
     python_requires=">=3.7",
     install_requires=requirements,

@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: NGSF
 Version: 0.0.1
 Summary: Next Generation SuperFit in Python
@@ -13,6 +13,23 @@ Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.7
 Description-Content-Type: text/x-rst
+Requires-Dist: astropy
+Requires-Dist: extinction
+Requires-Dist: matplotlib
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: PyAstronomy
+Requires-Dist: scipy
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
 
 # Welcome to NGSF - Next Generation SuperFit in Python! :dizzy: :bomb: :boom:
 
@@ -28,12 +45,48 @@ Superfit in python is a software for the spectral classification of Supernovae o
 - `Pandas version: 0.23.4`
 - `PyAstronomy version: 0.13.0`
 
+Optional: `threadpoolctl`, which lets NGSF stop worker processes from
+contending over BLAS threads. Without it the fit is correct, just slower.
+
 
 # To run one object
 The user must make sure to have a template bank to look at. The new template bank can be downloaded from WISeREP [here](https://www.wiserep.org/content/wiserep-getting-started#supyfit).
 
 
 The user must download the full superfit folder and place the bank inside it, also any spectra to be analyzed. The user only changes the parameters from the json file already within the folder, the following is an explanation of the parameters.
+
+### Where the template bank is looked for
+
+NGSF finds the bank by checking, in order:
+
+1. `$NGSF_BANK_DIR`, if set;
+2. `./bank` relative to the working directory;
+3. `bank/` next to the installed `NGSF` package.
+
+If none exist it says so and names the paths it tried, rather than failing
+later with a confusing file-not-found.
+
+### Command line
+
+    python run.py parameters.json
+
+Anything in the JSON can be overridden per-run without editing the file:
+
+    python run.py parameters.json --object spectrum.flm --out results/ --no-plots
+    python run.py parameters.json --resolution 30
+
+### From Python
+
+Importing NGSF does not require command-line arguments, so it can be driven
+from a script or notebook:
+
+```python
+from NGSF.sf_class import Superfit
+
+fit = Superfit("parameters.json")        # or a plain dict
+fit.superfit()
+print(fit.results.head())
+```
 
 
 ## The parameters of the fit
@@ -120,11 +173,77 @@ The user must only change the parameters of the fit from the parameters.json fil
 `"Alam_interval"`: size of interval
 
 
+### Optional parameters
+
+These all have defaults and can be left out of the JSON entirely.
+
+`"n_cores"`: worker processes for the (redshift, A_v) grid. `0` or absent
+means "use the CPUs this process is allowed on", capped at 32 — past that,
+process startup costs more than the extra parallelism returns. The pool is
+never larger than the number of grid points.
+
+`"iterations"`: how many templates each grid point contributes to the result
+table. Default 10. Raise it if the final list is shorter than you want; the
+table is deduplicated by SN, so many grid points agreeing on the same
+template yields few rows.
+
+`"weighted_solve"`: `0` (default) or `1`. See "A note on the weighting"
+below. Off by default so results reproduce; turning it on changes them.
+
+### A note on the weighting
+
+The supernova and galaxy amplitudes are solved by minimising the
+**unweighted** residual, while the chi2 that ranks the templates is weighted
+by the error spectrum. The reported chi2 is therefore not the minimum of the
+reported model. Setting `"weighted_solve": 1` carries `1/sigma^2` into the
+solve as well, which on the bundled test spectrum lowers chi2 by a median
+20% and reorders the tail of the results (the top match is unchanged there,
+but it need not be in general).
+
+This is left off by default so that existing results reproduce. If you are
+starting fresh, `1` is the statistically consistent choice.
+
+### Warnings you should not ignore
+
+The run prints a warning when a best-fit `A_v` or `Z` lands on the first or
+last value of the grid it was allowed to search, for example:
+
+    WARNING: rank 1: best-fit A_v = -2 sits on the lower edge of the searched
+    grid [-2, 2]; the true optimum is probably outside it, so widen the range
+    before trusting this value
+
+A parameter pinned to the edge of its range is a boundary artefact, not a
+measurement. Widen `Alam_low`/`Alam_high` (or the redshift range) and refit.
+
+
 ## To Run
 
 Once the parameters have been updated in the `parameters.json` file the user simply needs to run the script from the `run.py` file.
 
 It is important to note that the file of the object to be analyzed should be within the superfit folder.
+
+
+## Tests
+
+    pytest                      # everything, ~10s
+    pytest -m "not endtoend"    # skip the tests that need the template bank
+
+Three groups:
+
+- `test_core_kernel.py` pins the fitting linear algebra against an
+  independent loop-based reference, so optimisation work can be checked
+  against something other than itself.
+- `test_robustness.py` drives extreme inputs — cosmic rays, NaN gaps,
+  interpolated-flat stretches, spectra straddling zero — through the error
+  and binning routines.
+- `test_regression.py` runs the real pipeline over the real bank and
+  compares against a committed golden result, separating "which template won
+  and in what order" from "what were the numbers".
+
+If you change the science on purpose, regenerate the golden file in the same
+commit and say why:
+
+    python NGSF/tests/test_regression.py --regenerate
 
 
 
