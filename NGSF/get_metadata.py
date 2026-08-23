@@ -1,6 +1,5 @@
 import glob
 import numpy as np
-from astropy.io import ascii
 import os
 import pandas as pd
 import csv
@@ -72,17 +71,20 @@ class Metadata(object):
                 Type_dic[sub]=sn_type
                 if os.path.exists(subpath+'/wiserep_spectra.csv'):
                     have_wiserep.append(subpath)
-                    wise=ascii.read(subpath+'/wiserep_spectra.csv')
+                    # pandas parses these ~190 files about 5x faster than
+                    # astropy.io.ascii, which was the single largest cost in
+                    # building the metadata.
+                    wise=pd.read_csv(subpath+'/wiserep_spectra.csv')
                     path_dic[sub]=subpath
-                    z_dic[sub]=wise['Redshift'][0]
-                    coord_dic[sub]=np.array(list(wise['Obj. RA','Obj. DEC'][0]))
+                    z_dic[sub]=wise['Redshift'].iloc[0]
+                    coord_dic[sub]=np.array(list(wise[['Obj. RA','Obj. DEC']].iloc[0]))
 
 
 
-                    JD_dic[sub]=np.array(wise['JD'][:])
-                    obs_date_dict[sub]=np.array(wise['Obs-date'][:])
-                    spec_file_dic[sub]=np.array(wise['Ascii file'][:])
-                    inst_dic[sub]=np.array(wise['Instrument'][:])
+                    JD_dic[sub]=np.array(wise['JD'])
+                    obs_date_dict[sub]=np.array(wise['Obs-date'])
+                    spec_file_dic[sub]=np.array(wise['Ascii file'])
+                    inst_dic[sub]=np.array(wise['Instrument'])
                     lis=[]
                     for i,spec_file in enumerate(spec_file_dic[sub]):
 
@@ -94,7 +96,7 @@ class Metadata(object):
 
                         else:
 
-                            phase = float(wise['JD'][i]) - JD(float(MJD_dictionary[sub]))
+                            phase = float(wise['JD'].iloc[i]) - JD(float(MJD_dictionary[sub]))
 
                             phase = round(phase,2)
 
@@ -103,7 +105,7 @@ class Metadata(object):
 
                             band = band_dictionary[sub]
 
-                            shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'][i]+' phase-band : '+ str(phase) + str(band)
+                            shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'].iloc[i]+' phase-band : '+ str(phase) + str(band)
 
                             short_path_dict[shorhand_dict[spec_file]]=spec_file
 
@@ -117,7 +119,7 @@ class Metadata(object):
 
                                 band = band_dictionary[sub]
 
-                                shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'][i]+' phase-band : '+ str(phase) + str(band)
+                                shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'].iloc[i]+' phase-band : '+ str(phase) + str(band)
 
                                 short_path_dict[shorhand_dict[spec_file]]=spec_file
 
@@ -131,3 +133,24 @@ class Metadata(object):
         self.shorhand_dict = shorhand_dict
         self.no_wiserep = no_wiserep
         self.dictionary_all_trunc_objects = dictionary_all_trunc_objects
+
+
+_cached_metadata = None
+_cached_for = None
+
+
+def get_metadata():
+    """Return the bank metadata, scanning the bank at most once per config.
+
+    Building this walks every object directory and parses ~190 wiserep CSVs.
+    It used to be done twice per run -- once in Superfit.__init__ and once in
+    all_parameter_space -- for identical results.
+    """
+
+    global _cached_metadata, _cached_for
+
+    params = get_parameters()
+    if _cached_metadata is None or _cached_for is not params:
+        _cached_metadata = Metadata()
+        _cached_for = params
+    return _cached_metadata

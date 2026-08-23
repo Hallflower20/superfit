@@ -11,7 +11,7 @@ from astropy.table import Table
 from NGSF.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
 from NGSF.Header_Binnings import kill_header, kill_header_and_bin
 from NGSF.error_routines import linear_error, savitzky_golay
-from NGSF.get_metadata import Metadata
+from NGSF.get_metadata import get_metadata
 from NGSF.params import parameters, get_parameters, set_config
 from NGSF.paths import gal_dir, sne_dir
 
@@ -99,7 +99,7 @@ class Superfit:
         )
         self.int_obj = int_obj(parameters.lam)
 
-        self.metadata = Metadata()
+        self.metadata = get_metadata()
 
         # Make json with the used parameters
         used_json = parameters.save_results_path + "{}_used.json".format(
@@ -238,6 +238,7 @@ class Superfit:
             save=self.results_name,
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
+            n_cores=parameters.n_cores,
         )
 
         self.results = pd.read_csv(self.results_path)

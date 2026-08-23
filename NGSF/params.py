@@ -207,7 +207,12 @@ class Parameters:
         # How many results to plot?
         self.n = data["how_many_plots"]
 
-        self.iterations = 10
+        self.iterations = data.get("iterations", 10)
+
+        # Worker processes for the (z, A_v) grid. 0 or absent means "use every
+        # CPU this process is allowed on"; the pool is capped at the number of
+        # grid points regardless.
+        self.n_cores = data.get("n_cores", 0)
 
         # Template library
 

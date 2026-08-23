@@ -16,7 +16,7 @@ which is exactly the signal we want.
 import numpy as np
 import pytest
 
-from NGSF.SF_functions import sn_hg_arrays
+from NGSF.SF_functions import sn_hg_arrays, solve_grid
 
 
 def reference_solution(int_obj, sn, gal, sigma, minimum_overlap=0.7):
@@ -188,6 +188,131 @@ class TestLinearAlgebra:
         )
         assert np.isinf(vec["chi2"][:, 0]).all()
         assert np.isfinite(vec["chi2"][:, 1:]).all()
+
+
+class TestSolveGrid:
+    """``solve_grid`` replaced the broadcast residual cube with matrix products.
+
+    The algebra is identical, the floating-point summation order is not, so
+    these compare against the direct form rather than against stored numbers.
+    Ragged template coverage and NaN gaps are the cases where the two could
+    plausibly diverge, so they are the cases exercised.
+    """
+
+    @staticmethod
+    def _ragged_problem(rng, n_lam=200, n_sn=12, n_gal=5, gap_obj=False, gap_sig=False):
+        sn = np.abs(rng.normal(1.0, 0.4, (1, n_sn, n_lam)))
+        gal = np.abs(rng.normal(1.0, 0.4, (n_gal, 1, n_lam)))
+        obj = np.abs(rng.normal(1.0, 0.3, n_lam))
+        sigma = np.abs(rng.normal(0.05, 0.01, n_lam)) + 1e-3
+
+        # Real templates do not all span the observed grid.
+        for s in range(n_sn):
+            sn[0, s, : rng.integers(0, n_lam // 4)] = np.nan
+        for g in range(n_gal):
+            gal[g, 0, : rng.integers(0, n_lam // 5)] = np.nan
+
+        if gap_obj:
+            obj[rng.choice(n_lam, size=n_lam // 20, replace=False)] = np.nan
+        if gap_sig:
+            sigma[rng.choice(n_lam, size=5, replace=False)] = np.nan
+
+        return sn, gal, obj, sigma
+
+    @staticmethod
+    def _direct(sn, gal, int_obj, sigma):
+        """The pre-optimisation broadcast implementation."""
+
+        c = 1 / (
+            np.nansum(sn**2, 2) * np.nansum(gal**2, 2)
+            - np.nansum(gal * sn, 2) ** 2
+        )
+        b = c * (
+            np.nansum(gal**2, 2) * np.nansum(sn * int_obj, 2)
+            - np.nansum(gal * sn, 2) * np.nansum(gal * int_obj, 2)
+        )
+        d = c * (
+            np.nansum(sn**2, 2) * np.nansum(gal * int_obj, 2)
+            - np.nansum(gal * sn, 2) * np.nansum(sn * int_obj, 2)
+        )
+        b, d = b.copy(), d.copy()
+        b[b < 0] = np.nan
+        d[d < 0] = np.nan
+
+        sn_b, gal_d = b[:, :, np.newaxis], d[:, :, np.newaxis]
+        resid = int_obj - (sn_b * sn + gal_d * gal)
+        times = int_obj.size - np.nansum(np.isnan((resid / sigma) ** 2), 2)
+        chi2 = np.nansum(resid**2 / sigma**2, 2)
+        return b, d, chi2, times
+
+    @pytest.mark.parametrize(
+        "gap_obj,gap_sig",
+        [(False, False), (True, False), (False, True), (True, True)],
+        ids=["clean", "nan-in-object", "nan-in-sigma", "nan-in-both"],
+    )
+    def test_agrees_with_the_direct_form(self, rng, gap_obj, gap_sig):
+        sn, gal, obj, sigma = self._ragged_problem(
+            rng, gap_obj=gap_obj, gap_sig=gap_sig
+        )
+
+        b0, d0, chi0, t0 = self._direct(sn, gal, obj, sigma)
+        b1, d1, chi1, t1 = solve_grid(sn, gal, obj, sigma)
+
+        # Pixel counts are integers and must agree exactly.
+        np.testing.assert_array_equal(t0, t1)
+
+        # Rejected (negative-amplitude) cells must be rejected identically.
+        np.testing.assert_array_equal(np.isnan(b0), np.isnan(b1))
+        np.testing.assert_array_equal(np.isnan(d0), np.isnan(d1))
+
+        good = np.isfinite(b0) & np.isfinite(d0)
+        np.testing.assert_allclose(b1[good], b0[good], rtol=1e-10)
+        np.testing.assert_allclose(d1[good], d0[good], rtol=1e-10)
+        np.testing.assert_allclose(chi1[good], chi0[good], rtol=1e-9)
+
+    def test_ranking_is_preserved(self, rng):
+        """What actually matters: the same templates come out on top."""
+
+        for _ in range(20):
+            sn, gal, obj, sigma = self._ragged_problem(rng)
+            _, _, chi0, _ = self._direct(sn, gal, obj, sigma)
+            _, _, chi1, _ = solve_grid(sn, gal, obj, sigma)
+
+            order0 = np.argsort(np.where(np.isfinite(chi0), chi0, np.inf), axis=None)
+            order1 = np.argsort(np.where(np.isfinite(chi1), chi1, np.inf), axis=None)
+            np.testing.assert_array_equal(order0[:10], order1[:10])
+
+    def test_chi2_is_never_negative(self, rng):
+        """The expanded form is a difference of large terms; guard the floor."""
+
+        sn, gal, obj, sigma = self._ragged_problem(rng)
+        _, _, chi2, _ = solve_grid(sn, gal, obj, sigma)
+        assert (chi2[np.isfinite(chi2)] >= 0).all()
+
+    def test_perfect_fit_scores_zero(self):
+        """An observation built exactly from one pair must score ~0 there."""
+
+        n_lam = 150
+        rng = np.random.default_rng(3)
+        sn = np.abs(rng.normal(1.0, 0.3, (1, 4, n_lam)))
+        gal = np.abs(rng.normal(1.0, 0.3, (3, 1, n_lam)))
+        obj = 0.8 * sn[0, 2] + 0.5 * gal[1, 0]
+        sigma = np.full(n_lam, 0.01)
+
+        b, d, chi2, _ = solve_grid(sn, gal, obj, sigma)
+
+        assert chi2[1, 2] < 1e-12
+        np.testing.assert_allclose(b[1, 2], 0.8, rtol=1e-9)
+        np.testing.assert_allclose(d[1, 2], 0.5, rtol=1e-9)
+
+    def test_does_not_modify_its_inputs(self, rng):
+        sn, gal, obj, sigma = self._ragged_problem(rng)
+        before = [a.copy() for a in (sn, gal, obj, sigma)]
+
+        solve_grid(sn, gal, obj, sigma)
+
+        for got, want in zip((sn, gal, obj, sigma), before):
+            np.testing.assert_array_equal(got, want)
 
 
 class TestSnHgArrays:

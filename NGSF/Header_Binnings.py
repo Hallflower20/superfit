@@ -245,43 +245,56 @@ def bin_spectrum_bank(spectrum, resolution):
         return bin_spectra
 
 
-def mask_lines_bank(Data, z_obj=0):
+# Nebular host-galaxy emission lines, rest frame, in air.
+HOST_LINES = np.array(
+    [
+        6564.61,
+        4862.69,
+        3726.09,
+        3729.88,
+        5008.24,
+        4960.30,
+        6549.84,
+        6585.23,
+        6718.32,
+        6732.71,
+    ]
+)
 
-    # The objects in the bank have a redshift of zero
+# airtovac2 is a slow PyAstronomy call and the lines never change, so convert
+# once at import rather than on each of the ~1000 templates loaded per run.
+HOST_LINES_VAC = pyasl.airtovac2(HOST_LINES)
 
-    # z_obj = 0
+# Half-width of the mask around each line: 400 km/s expressed as a redshift.
+LINE_MASK_DISPERSION = 4e2 / 3e5
 
-    # These lines are in rest frame
 
-    host_lines = np.array(
-        [
-            6564.61,
-            4862.69,
-            3726.09,
-            3729.88,
-            5008.24,
-            4960.30,
-            6549.84,
-            6585.23,
-            6718.32,
-            6732.71,
-        ]
+def host_line_ranges(z_obj=0.0):
+    """(n_lines, 2) array of [low, high] wavelength bounds to mask at ``z_obj``."""
+
+    centres = (1 + z_obj) * HOST_LINES_VAC
+    return np.column_stack(
+        [centres * (1 - LINE_MASK_DISPERSION), centres * (1 + LINE_MASK_DISPERSION)]
     )
 
-    host_lines_air = (1 + z_obj) * pyasl.airtovac2(host_lines)
-    host_range_air = np.column_stack([host_lines_air, host_lines_air])
-    z_disp = 4e2 / 3e5
-    host_range_air[:, 0] = host_range_air[:, 0] * (1 - z_disp)
-    host_range_air[:, 1] = host_range_air[:, 1] * (1 + z_disp)
 
-    def func(x, y):
-        return (x < y[1]) & (x > y[0])
+def mask_host_lines(Data, z_obj=0.0):
+    """Drop rows whose wavelength falls inside any host emission line.
 
-    cum_mask = np.array([True] * len(Data[:, 0]))
-    for i in range(len(host_lines_air)):
-        mask = np.array(list(map(lambda x: ~func(x, host_range_air[i]), Data[:, 0])))
-        cum_mask = cum_mask & mask
+    Vectorised over lines and pixels at once. The previous implementation
+    looped over the ten lines and mapped a Python lambda across every pixel,
+    which dominated the cost of loading the template bank.
+    """
 
-    Data_masked = Data[cum_mask]
+    ranges = host_line_ranges(z_obj)
+    lam = Data[:, 0]
 
-    return Data_masked
+    inside = (lam[:, None] > ranges[None, :, 0]) & (lam[:, None] < ranges[None, :, 1])
+
+    return Data[~inside.any(axis=1)]
+
+
+def mask_lines_bank(Data, z_obj=0):
+    """Mask host lines in a bank template. Bank objects are at rest, so z = 0."""
+
+    return mask_host_lines(Data, z_obj)
