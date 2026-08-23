@@ -300,6 +300,7 @@ class Superfit:
             n_cores=parameters.n_cores,
             observed_grid=parameters.observed_grid,
             weighted_solve=parameters.weighted_solve,
+            R_v=parameters.R_v,
         )
 
         self.results = pd.read_csv(self.results_path)
@@ -373,16 +374,15 @@ class Superfit:
             host = np.loadtxt(hg_name)
             host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
 
-            # Interpolate supernova and host galaxy
-            # redshifted_nova   =  nova[:,0]*(z+1)
-            # extinct_nova      =  nova[:,1]*10**(-0.4*extmag * Alam(nova[:,0]))/(1+z)
-
-            # reshifted_host    =  host[:,0]*(z+1)
-            # reshifted_hostf   =  host[:,1]/(z+1)
-
+            # Interpolate supernova and host galaxy. This reconstructs the
+            # model the fitter scored, so the reddening has to match it: the
+            # law is evaluated at nova[:, 0], the template's REST wavelength,
+            # exactly as the fit evaluates it at lam / (1 + z).
             redshifted_nova = nova[:, 0] * (z + 1)
             extinct_nova = (
-                nova[:, 1] * 10 ** (-0.4 * extmag * Alam(nova[:, 0])) / (z + 1)
+                nova[:, 1]
+                * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
+                / (z + 1)
             )
 
             reshifted_host = host[:, 0] * (z + 1)
@@ -468,9 +468,15 @@ class Superfit:
         host = np.loadtxt(hg_name)
         host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
 
-        # Interpolate supernova and host galaxy
+        # Interpolate supernova and host galaxy. As in _plot_best_fits, the
+        # law is evaluated at the template's rest wavelength so that this
+        # matches the model the fitter scored.
         redshifted_nova = nova[:, 0] * (z + 1)
-        extinct_nova = nova[:, 1] * 10 ** (-0.4 * extmag * Alam(nova[:, 0])) / (z + 1)
+        extinct_nova = (
+            nova[:, 1]
+            * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
+            / (z + 1)
+        )
 
         reshifted_host = host[:, 0] * (z + 1)
         reshifted_hostf = host[:, 1] / (z + 1)

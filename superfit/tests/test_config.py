@@ -116,6 +116,8 @@ class TestValidation:
             (dict(error_spectrum="magic"), "must be 'sg'"),
             (dict(Alam_interval=0), "Alam_interval must be positive"),
             (dict(Alam_low=2, Alam_high=-2), "below Alam_low"),
+            (dict(R_v=0), "R_v is a total-to-selective"),
+            (dict(R_v=-3.1), "R_v is a total-to-selective"),
             (dict(temp_sn_tr=[]), "nothing to fit"),
             (dict(temp_gal_tr=[]), "nothing to fit"),
         ],

@@ -75,10 +75,18 @@ DEFAULT_CONFIG = {
     "z_range_begin": 0.0,
     "z_range_end": 0.1,
     "z_int": 0.01,
-    # --- extinction grid -------------------------------------------------
+    # --- extinction ------------------------------------------------------
+    # A_v is searched over this grid. Negative A_v is not physical extinction;
+    # it is kept as slack for a template that is redder than the object, and
+    # so that a best fit at A_v = 0 is an interior point rather than an edge.
     "Alam_low": -2.0,
     "Alam_high": 2.0,
     "Alam_interval": 0.2,
+    # Total-to-selective extinction ratio for the CCM89 law. 3.1 is the
+    # diffuse Milky Way average and the usual default. The law is applied at
+    # the template's REST wavelength, so this A_v models host-galaxy dust;
+    # any Galactic component is absorbed into the same single term.
+    "R_v": 3.1,
     # --- templates -------------------------------------------------------
     "temp_sn_tr": ALL_SN_TYPES,
     "temp_gal_tr": ALL_GALAXY_TYPES,
@@ -268,6 +276,12 @@ def validate_config(config):
             "Alam_high ({}) is below Alam_low ({})".format(
                 config["Alam_high"], config["Alam_low"]
             )
+        )
+
+    if config["R_v"] <= 0:
+        raise ConfigError(
+            "R_v is a total-to-selective extinction ratio and must be "
+            "positive, got {!r}".format(config["R_v"])
         )
 
     if not config["use_exact_z"]:

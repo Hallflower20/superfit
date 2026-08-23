@@ -281,10 +281,20 @@ this (the example spectrum is included in the repository):
 `"Alam_low"`: Lower value for the extinction law constant
 `"Alam_interval"`: size of interval
 
+A_v is the CCM89 extinction in magnitudes at V, applied to the supernova
+template at its **rest** wavelength — so it models host-galaxy dust, and any
+Milky Way component is absorbed into the same single term. Negative A_v is not
+physical extinction; it is kept in the default grid as slack for a template
+redder than the object, and so that a best fit at zero extinction is an
+interior point rather than a grid edge.
+
 
 ### Optional parameters
 
 These all have defaults and can be left out of the JSON entirely.
+
+`"R_v"`: total-to-selective extinction ratio for the CCM89 law. Defaults to
+`3.1`, the diffuse Milky Way average. Lower it for denser sightlines.
 
 `"n_cores"`: worker processes for the (redshift, A_v) grid. `0` or absent
 means "use the CPUs this process is allowed on", capped at 32 — past that,

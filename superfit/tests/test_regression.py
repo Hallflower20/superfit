@@ -58,6 +58,7 @@ GOLDEN_CONFIG = {
     "Alam_low": -2,
     "Alam_high": 2,
     "Alam_interval": 0.2,
+    "R_v": 3.1,
     "iterations": 10,
     "weighted_solve": 0,
     "show_plot": 0,

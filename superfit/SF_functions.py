@@ -1,7 +1,6 @@
 import numpy as np
 from scipy import interpolate
 import extinction
-from extinction import apply
 from astropy import table
 from astropy.table import Table
 from astropy.io import ascii
@@ -29,7 +28,7 @@ np.seterr(divide="ignore", invalid="ignore")
 
 
 
-def redshifted_models(sn_bank, gal_bank, lam, z, extcon):
+def redshifted_models(sn_bank, gal_bank, lam, z, extcon, R_v=3.1):
     """Supernova and galaxy models at one (redshift, extinction) point.
 
     Returns ``(sn, gal)`` shaped (1, n_sn, n_lam) and (n_gal, 1, n_lam), ready
@@ -37,7 +36,10 @@ def redshifted_models(sn_bank, gal_bank, lam, z, extcon):
 
     Both banks are dimmed by (1 + z). Only the supernova is reddened, and the
     extinction law is evaluated at the rest wavelength each observed pixel
-    corresponds to, ``lam / (1 + z)``.
+    corresponds to, ``lam / (1 + z)``. That is a modelling choice, not an
+    accident: reddening at the rest wavelength is host-galaxy dust. Galactic
+    dust would act at the observed wavelength, and this single A_v absorbs
+    both.
 
     Splitting the redshift from the extinction matters: the shift is shared
     by every template and by every extinction value, so a caller sweeping A_v
@@ -47,7 +49,7 @@ def redshifted_models(sn_bank, gal_bank, lam, z, extcon):
     one_plus_z = 1.0 + z
     sn = redshift_bank(sn_bank, z)
     gal = redshift_bank(gal_bank, z)
-    reddening = 10 ** (-0.4 * extcon * Alam(np.asarray(lam) / one_plus_z))
+    reddening = 10 ** (-0.4 * extcon * Alam(np.asarray(lam) / one_plus_z, R_v=R_v))
 
     return (sn * reddening)[np.newaxis, :, :], gal[:, np.newaxis, :]
 
@@ -82,18 +84,26 @@ def remove_telluric(spectrum):
 
 def Alam(lamin, A_v=1, R_v=3.1):
 
-    """
-    Add extinction with R_v = 3.1 and A_v = 1, A_v = 1 in order
-    to find the constant of proportionality for
-    the extinction law.
+    """A_lambda in magnitudes from the CCM89 law, at ``A_v`` and ``R_v``.
+
+    Magnitudes is what the name promises and what every caller assumes: each
+    one forms the transmission itself, as ``10 ** (-0.4 * A_v * Alam(lam))``.
+
+    This used to return ``extinction.apply(ccm89(...), ones)``, which is the
+    *transmission* ``10 ** (-0.4 * A_lambda)`` rather than A_lambda. The
+    callers then exponentiated a second time, computing
+    ``10 ** (-0.4 * A_v * 10 ** (-0.4 * A_lambda))``. That curve removes more
+    red light than blue -- the reddening ran backwards, so positive A_v made
+    spectra bluer and negative A_v was doing the work extinction should.
+
+    ``ccm89`` is linear in A_v, so the default ``A_v = 1`` gives the shape of
+    the curve and a caller's own A_v scales it exactly. It is strict about
+    dtype and wants a float64 array; ``np.asarray`` is the element-by-element
+    ``[float(i) for i in lamin]`` conversion this used to do, without the
+    Python loop.
     """
 
-    flux = np.ones(len(lamin))
-    flux = [float(x) for x in flux]
-    lamin = np.array([float(i) for i in lamin])
-    redreturn = apply(extinction.ccm89(lamin, A_v, R_v), flux)
-
-    return redreturn
+    return extinction.ccm89(np.asarray(lamin, dtype=np.float64), A_v, R_v)
 
 
 def error_obj(kind, lam, object_to_fit):
@@ -363,11 +373,6 @@ def core(
     # single-row astropy Table per result and stacking them cost more than
     # the chi2 it was reporting -- 11.6 ms against 9.7 ms per grid point on
     # the shipped bank, because each Table validates and converts 13 columns.
-    # Used only for the reported SN/host flux split. Note this reapplies the
-    # reddening to a model that already carries it, and evaluates the law at
-    # the observed rather than the rest wavelength -- both pre-existing, and
-    # both affecting only the Frac(SN)/Frac(gal) diagnostic, never the fit.
-    extinction_at_lam = 10 ** (-0.4 * extcon * Alam(lam))
 
     redchi2 = []
     spectra = []
@@ -396,9 +401,13 @@ def core(
         bb = b[idx[0]][idx[1]]
         dd = d[idx[0]][idx[1]]
 
+        # `sn` arrives already reddened -- it is the model the fitter scored.
+        # This used to multiply by the extinction a second time, and at the
+        # observed rather than the rest wavelength the model was reddened at,
+        # so the reported flux split described a model nobody had fitted.
         sn_flux = sn[0, idx[1], :]
         gal_flux = gal[idx[0], 0, :]
-        sn_contribution = bb * np.nanmean(sn_flux * extinction_at_lam)
+        sn_contribution = bb * np.nanmean(sn_flux)
         gal_contribution = dd * np.nanmean(gal_flux)
         total = sn_contribution + gal_contribution
 
@@ -513,8 +522,9 @@ def _fit_one_grid_point(args):
 
     # Extinction acts at the template's rest wavelength, which for observed
     # pixel lam is lam / (1 + z). Evaluating the law there directly is exact
-    # and avoids interpolating the extinction curve.
-    alam_rest = Alam(lam / (1.0 + z))
+    # and avoids interpolating the extinction curve. Rest frame means this
+    # models host-galaxy dust; see redshifted_models.
+    alam_rest = Alam(lam / (1.0 + z), R_v=state["R_v"])
 
     results = []
     for extcon in extinctions:
@@ -758,6 +768,7 @@ def all_parameter_space(
         "lam": lam,
         "iterations": iterations,
         "sigma": sigma,
+        "R_v": kwargs.get("R_v", 3.1),
         "kwargs": kwargs,
     }
 
