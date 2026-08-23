@@ -239,6 +239,7 @@ class Superfit:
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
             n_cores=parameters.n_cores,
+            weighted_solve=parameters.weighted_solve,
         )
 
         self.results = pd.read_csv(self.results_path)

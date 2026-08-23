@@ -214,6 +214,12 @@ class Parameters:
         # grid points regardless.
         self.n_cores = data.get("n_cores", 0)
 
+        # Solve for the SN/galaxy amplitudes using the same 1/sigma**2 weights
+        # the chi2 uses. Off by default: it is the statistically consistent
+        # choice, but it shifts every chi2 and can change the best-fit
+        # template, so switching it on is a deliberate act.
+        self.weighted_solve = data.get("weighted_solve", 0)
+
         # Template library
 
         if self.resolution == 10 or self.resolution == 30:

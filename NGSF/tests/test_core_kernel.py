@@ -305,6 +305,57 @@ class TestSolveGrid:
         np.testing.assert_allclose(b[1, 2], 0.8, rtol=1e-9)
         np.testing.assert_allclose(d[1, 2], 0.5, rtol=1e-9)
 
+    def test_weighted_solve_is_off_by_default(self, rng):
+        sn, gal, obj, sigma = self._ragged_problem(rng)
+
+        default = solve_grid(sn, gal, obj, sigma)
+        explicit = solve_grid(sn, gal, obj, sigma, weighted=False)
+
+        for a, b in zip(default, explicit):
+            np.testing.assert_array_equal(a, b)
+
+    def test_weighted_solve_never_scores_worse(self, rng):
+        """It minimises the chi2 that is reported, so it cannot lose to a
+        solution that minimised something else."""
+
+        for _ in range(10):
+            sn, gal, obj, sigma = self._ragged_problem(rng)
+            # A strongly varying sigma is what makes the two differ at all.
+            sigma = sigma * (1 + 4 * np.abs(np.sin(np.arange(sigma.size) / 20.0)))
+
+            _, _, chi_unweighted, _ = solve_grid(sn, gal, obj, sigma)
+            _, _, chi_weighted, _ = solve_grid(sn, gal, obj, sigma, weighted=True)
+
+            good = np.isfinite(chi_unweighted) & np.isfinite(chi_weighted)
+            assert (chi_weighted[good] <= chi_unweighted[good] * (1 + 1e-9)).all()
+
+    def test_weighted_solve_matches_a_direct_least_squares(self, rng):
+        """Check one cell against an explicit weighted lstsq."""
+
+        sn, gal, obj, sigma = self._ragged_problem(rng, n_sn=4, n_gal=3)
+        b, d, _, _ = solve_grid(sn, gal, obj, sigma, weighted=True)
+
+        for g in range(3):
+            for s in range(4):
+                if not (np.isfinite(b[g, s]) and np.isfinite(d[g, s])):
+                    continue
+                ok = (
+                    np.isfinite(sn[0, s])
+                    & np.isfinite(gal[g, 0])
+                    & np.isfinite(obj)
+                    & np.isfinite(sigma)
+                )
+                design = np.column_stack([sn[0, s][ok], gal[g, 0][ok]])
+                w = 1.0 / sigma[ok]
+                coeffs, *_ = np.linalg.lstsq(
+                    design * w[:, None], obj[ok] * w, rcond=None
+                )
+                if (coeffs < 0).any():
+                    continue  # solve_grid rejects negatives; lstsq does not
+                np.testing.assert_allclose(
+                    [b[g, s], d[g, s]], coeffs, rtol=1e-8
+                )
+
     def test_does_not_modify_its_inputs(self, rng):
         sn, gal, obj, sigma = self._ragged_problem(rng)
         before = [a.copy() for a in (sn, gal, obj, sigma)]

@@ -349,3 +349,76 @@ class TestNormalisation:
         out = normalise_flux(flux)
 
         np.testing.assert_allclose(np.nanmedian(out), 1.0, rtol=1e-12)
+
+
+class TestGridEdgeWarnings:
+    """A best fit pinned to the edge of the searched grid is not a measurement."""
+
+    @staticmethod
+    def _table(a_v_values, z_values=None):
+        from astropy import table
+
+        n = len(a_v_values)
+        if z_values is None:
+            z_values = [0.1] * n
+        return table.Table({"A_v": list(a_v_values), "Z": list(z_values)})
+
+    def test_warns_when_extinction_pins_to_the_lower_edge(self):
+        from NGSF.SF_functions import grid_edge_warnings
+
+        grid = np.linspace(-2.0, 2.0, 21)
+        result = self._table([-2.0, 0.4, 1.0])
+
+        messages = grid_edge_warnings(result, np.array([0.1]), grid)
+
+        assert len(messages) == 1
+        assert "A_v" in messages[0] and "lower edge" in messages[0]
+
+    def test_warns_when_extinction_pins_to_the_upper_edge(self):
+        from NGSF.SF_functions import grid_edge_warnings
+
+        grid = np.linspace(-2.0, 2.0, 21)
+        result = self._table([2.0, 0.4, 1.0])
+
+        messages = grid_edge_warnings(result, np.array([0.1]), grid)
+
+        assert len(messages) == 1
+        assert "upper edge" in messages[0]
+
+    def test_silent_when_the_fit_is_interior(self):
+        from NGSF.SF_functions import grid_edge_warnings
+
+        grid = np.linspace(-2.0, 2.0, 21)
+        result = self._table([0.4, -0.8, 1.2])
+
+        assert grid_edge_warnings(result, np.array([0.1]), grid) == []
+
+    def test_warns_on_a_redshift_at_the_edge_of_a_scan(self):
+        from NGSF.SF_functions import grid_edge_warnings
+
+        z_grid = np.linspace(0.0, 0.2, 21)
+        result = self._table([0.4, 0.4], z_values=[0.2, 0.1])
+
+        messages = grid_edge_warnings(result, z_grid, np.linspace(-2.0, 2.0, 21))
+
+        assert any("Z" in m and "upper edge" in m for m in messages)
+
+    def test_single_valued_grid_is_not_an_edge(self):
+        """An exact-z run has one redshift; that is a choice, not a boundary."""
+
+        from NGSF.SF_functions import grid_edge_warnings
+
+        result = self._table([0.4], z_values=[0.127])
+
+        messages = grid_edge_warnings(
+            result, np.array([0.127]), np.linspace(-2.0, 2.0, 21)
+        )
+
+        assert not any("Z" in m for m in messages)
+
+    def test_empty_result_is_handled(self):
+        from NGSF.SF_functions import grid_edge_warnings
+        from astropy import table
+
+        empty = table.Table({"A_v": [], "Z": []})
+        assert grid_edge_warnings(empty, np.array([0.1]), np.array([-2.0, 2.0])) == []
