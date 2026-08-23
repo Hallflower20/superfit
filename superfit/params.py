@@ -6,6 +6,11 @@ import json
 from astropy.table import Table
 from superfit import config as config_module
 from superfit.auxiliary import select_templates
+from superfit.loggrid import (
+    LogGrid,
+    matched_velocity_resolution,
+    velocity_to_dlnlam,
+)
 from superfit.paths import gal_dir, sne_dir
 
 
@@ -157,20 +162,35 @@ class Parameters:
 
             # Historical: the grid starts from the SECOND sample, not the
             # first. Preserved deliberately -- it shifts the start by one
-            # pixel, which the 300 A padding swamps, but changing it would
-            # move lam and so every chi2 in the output.
+            # pixel, which the 300 A padding swamps.
             self.lower = wavelength[1] - 300
             self.upper = wavelength[-1] + 300
-
-            interval = int((self.upper - self.lower) / self.resolution)
-            self.lam = np.linspace(self.lower, self.upper, interval)
 
         else:
 
             self.upper = data["upper_lam"]
             self.lower = data["lower_lam"]
-            interval = int((self.upper - self.lower) / self.resolution)
-            self.lam = np.linspace(self.lower, self.upper, interval)
+
+        # The fit runs on a grid uniform in ln(lambda), so that a redshift is
+        # a shift along the axis rather than a rescaling of it. See
+        # superfit.loggrid.
+        if self.lower <= 0:
+            raise config_module.ConfigError(
+                "The fitting grid starts at {:.1f} A, which a logarithmic "
+                "grid cannot represent. Set lower_lam explicitly to a "
+                "positive wavelength.".format(self.lower)
+            )
+
+        self.velocity_resolution = data["velocity_resolution"]
+        if self.velocity_resolution is None:
+            self.velocity_resolution = matched_velocity_resolution(
+                self.resolution, self.lower, self.upper
+            )
+
+        self.observed_grid = LogGrid.spanning(
+            self.lower, self.upper, velocity_to_dlnlam(self.velocity_resolution)
+        )
+        self.lam = self.observed_grid.wavelength
 
         # Kind of error spectrum ('SG', 'linear' or 'included')
         self.kind = data["error_spectrum"]

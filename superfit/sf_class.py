@@ -298,6 +298,7 @@ class Superfit:
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
             n_cores=parameters.n_cores,
+            observed_grid=parameters.observed_grid,
             weighted_solve=parameters.weighted_solve,
         )
 

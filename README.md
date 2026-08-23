@@ -253,7 +253,9 @@ this (the example spectrum is included in the repository):
 
 `"z_range_begin"`,`"z_range_end"`,`"z_int"`: redshift values from which to build an array over which to look for the best fit.
 
-`"resolution"`: the resolution of the fit, the default is 10Å, however, if the spectra is of lower quality then the fit will be performed automatically at 30Å.
+`"resolution"`: the nominal resolution of the fit in Angstroms, default 10. The fit itself runs on a grid uniform in ln(lambda) (see below), so this is used to choose that grid's step unless `velocity_resolution` says otherwise.
+
+`"velocity_resolution"`: the step of the fitting grid, in km/s. Leave it unset and it is derived from `resolution` so the log grid holds as many bins as a linear grid of that many Angstroms would have over the same span -- about 500 km/s for the usual 10 A across the optical.
 
 `"temp_gal_tr"`, `"temp_sn_tr"`: template library folders over which to look in order to find the fit. It is recommended that the user uses the full library as is.
 
@@ -338,6 +340,30 @@ It is important to note that when you open the folder of the bank there are two 
 The "original_resolution" folder contains the raw spectra from the bank, with the wavelengths in observed frame. In the "binnings" folder we have the binned and redshift-corrected spectra from the "original_resolution" folder, and so the fits are done using the "binnings" folder.
 Within the object subfolders inside the "original_resolution" folder we will find the wiserep files containing the metadata for each object (name,redshift, observational date, etc.) we use this metadata during the fit, and so we keep the folder.
 
+
+## Why the fit runs in log wavelength
+
+The fitting grid is uniform in `ln(lambda)`, not in Angstroms, because a
+redshift is then a *translation*:
+
+    ln(lambda_obs) = ln(lambda_rest) + ln(1 + z)
+
+The displacement is the same for every template and every wavelength, so the
+bank is resampled once onto a rest-frame log grid and each trial redshift is
+two array slices and a linear blend across the whole bank at once. On a
+linear grid every template had to be interpolated onto the observed axis
+again at every trial redshift -- about a thousand `np.interp` calls per grid
+point.
+
+A consequence worth knowing: the grid is uniform in velocity, so its width in
+Angstroms grows with wavelength. At 500 km/s a bin is 8 A at 5000 A and 15 A
+at 9000 A, where a linear 10 A grid was 10 A everywhere. The blue end is
+sampled more finely and the red end less.
+
+Shifting also resamples twice -- once onto the rest grid, once for the shift
+-- so structure finer than a bin is averaged rather than reproduced. For
+resolved features the two agree to about 1 part in 10^3; for noise at the
+sampling scale it is a smoothing.
 
 ## How a fit is put together
 
