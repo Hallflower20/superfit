@@ -1,33 +1,133 @@
-# Welcome to NGSF - Next Generation SuperFit in Python! :dizzy: :bomb: :boom:
+# superfit
 
-Superfit in python is a software for the spectral classification of Supernovae of all major types accompanied by a host galaxy. The following list of versions are the minumum requierments for its use.
+Spectral classification of supernovae. `superfit` fits an observed spectrum
+against a bank of supernova and host-galaxy templates over a grid of
+redshift and extinction, and ranks the matches by chi2.
 
-## Requierments
+Formerly published as **NGSF** (Next Generation SuperFit). `import NGSF`
+still works and warns; new code should use `superfit`.
 
-- `Python version: 3.7.1`
-- `numpy version: 1.21.2`
-- `scipy version: 1.7.1`
-- `matplotlib version: 3.0.2`
-- `astropy version: 3.1`
-- `Pandas version: 0.23.4`
-- `PyAstronomy version: 0.13.0`
+## Install
 
-Optional: `threadpoolctl`, which lets NGSF stop worker processes from
-contending over BLAS threads. Without it the fit is correct, just slower.
+```bash
+pip install superfit
+```
 
-The code is tested on both an older stack (numpy 1.24, scipy 1.8, astropy
-5.2, pandas 1.5) and a current one (numpy 2.5, scipy 1.18, astropy 8.0,
-pandas 3.0), and produces byte-identical results on either.
+Then fetch the template bank, which is a 74 MB download and is deliberately
+not bundled:
 
-### Building an environment
+```bash
+curl -LO https://www.wiserep.org/sites/default/files/supyfit_bank.zip
+unzip supyfit_bank.zip          # creates ./bank
+```
 
-A self-contained virtualenv, which keeps NGSF's dependencies out of your
-user site-packages (`~/.local`) where they can collide with other projects:
+`superfit` looks for the bank in `$SUPERFIT_BANK_DIR`, then `./bank`, then
+next to the installed package. If it cannot find one it says so and lists
+where it looked.
 
-    python -m venv /path/to/envs/superfit        # NOT --system-site-packages
-    source /path/to/envs/superfit/bin/activate
-    pip install -r requirements.txt pytest
-    pip install -e /path/to/superfit             # editable: `superfit` on PATH
+## Quick start
+
+Fitting arrays you already have in memory — nothing has to touch disk:
+
+```python
+from superfit import Superfit
+
+results = Superfit(wavelength=lam, flux=flux, error=err, z=0.127).run()
+print(results[["SN", "GALAXY", "A_v", "CHI2/dof"]].head())
+```
+
+`results` is a pandas DataFrame, best match first.
+
+From a file instead:
+
+```python
+from superfit import Spectrum, Superfit
+
+spectrum = Spectrum.from_file("SN2021urb.flm")
+results = Superfit(spectrum, z=0.127).run()
+```
+
+A `Spectrum` is reusable, so scanning a few redshifts costs one read:
+
+```python
+for z in (0.12, 0.127, 0.13):
+    print(z, Superfit(spectrum, z=z).run()["CHI2/dof"].iloc[0])
+```
+
+Or from the command line, with a JSON parameter file:
+
+```bash
+superfit parameters.json
+superfit parameters.json --object spectrum.flm --out results/ --no-plots
+superfit parameters.json --resolution 30 --n-cores 16
+```
+
+## Supplying the spectrum
+
+`Superfit` takes the observation in whichever form you have it:
+
+```python
+Superfit(wavelength=lam, flux=flux, error=err)   # arrays
+Superfit(Spectrum.from_file("spec.flm"))          # a Spectrum
+Superfit("spec.flm")                              # a path
+Superfit(numpy_array)                             # (n, 2) or (n, 3)
+```
+
+`error` is optional. It is only *required* for
+`error_spectrum="included"`; otherwise the uncertainty is estimated from
+the spectrum itself (see below).
+
+`Spectrum` sorts descending wavelengths rather than complaining, and
+refuses input that cannot be a spectrum — mismatched lengths, duplicate
+wavelengths, all-NaN flux — naming the problem.
+
+## Configuring the fit
+
+Every setting has a default, so pass only what you care about. Settings can
+come as keywords, as a dict, as a JSON string, or as a path to a JSON file:
+
+```python
+Superfit(spectrum, z=0.127, resolution=30)
+Superfit(spectrum, config={"resolution": 30, "minimum_overlap": 0.5})
+Superfit(spectrum, config="parameters.json", z=0.127)   # file, one override
+```
+
+Some shorthand is accepted: `z` (implies an exact redshift rather than a
+scan), `output_dir`, `n_plots`, `error_model`, `cores`.
+
+Unknown keys are rejected rather than ignored, and combinations that cannot
+work — masking host lines while scanning redshift, a negative resolution, an
+inverted A_v range — are caught up front instead of failing inside a worker
+process partway through a run.
+
+Whatever you pass, the *complete* effective configuration is written to
+`<name>_used.json` next to the results, so a three-keyword call is as
+reproducible as a full JSON one. See `superfit.config.DEFAULT_CONFIG` for
+the defaults, and the parameter reference below for what each key means.
+
+## Requirements
+
+Python 3.9+, with numpy, scipy, astropy, pandas, matplotlib, extinction,
+PyAstronomy and tqdm. `pip install superfit` handles these.
+
+Optional: `pip install superfit[speed]` adds `threadpoolctl`, which stops
+worker processes contending over BLAS threads. Without it the fit is
+correct, just slower.
+
+Tested on both an older stack (numpy 1.24, scipy 1.8, astropy 5.2, pandas
+1.5) and a current one (numpy 2.5, scipy 1.18, astropy 8.0, pandas 3.0),
+producing byte-identical results on either.
+
+### Building an environment from source
+
+A self-contained virtualenv, which keeps the dependencies out of your user
+site-packages (`~/.local`) where they can collide with other projects:
+
+```bash
+python -m venv /path/to/envs/superfit        # NOT --system-site-packages
+source /path/to/envs/superfit/bin/activate
+pip install -e ".[dev]"
+```
 
 Building *without* `--system-site-packages` is deliberate. A venv that
 inherits the system packages also picks up `~/.local`, and a stale package
@@ -38,65 +138,67 @@ inside matplotlib that has nothing to do with your code.
 
 An environment built this way lives at
 
-    /global/cfs/cdirs/desicollab/users/xhall/envs/superfit
+```
+/global/cfs/cdirs/desicollab/users/xhall/envs/superfit
+```
 
 Activate and go, from any working directory:
 
-    source /global/cfs/cdirs/desicollab/users/xhall/envs/superfit/bin/activate
-    superfit /path/to/parameters.json
+```bash
+source /global/cfs/cdirs/desicollab/users/xhall/envs/superfit/bin/activate
+superfit /path/to/parameters.json
+```
 
 It is an editable install of the checkout at
 `/global/cfs/cdirs/desicollab/users/xhall/GitHub/superfit`, so the template
-bank is found automatically and `git pull` takes effect without reinstalling.
-Moving or renaming that checkout breaks the link; re-run `pip install -e .`
-if you do.
+bank is found automatically and `git pull` takes effect without
+reinstalling. Moving or renaming that checkout breaks the link; re-run
+`pip install -e .` if you do.
 
+## Tests
 
-# To run one object
-The user must make sure to have a template bank to look at. The new template bank can be downloaded from WISeREP [here](https://www.wiserep.org/content/wiserep-getting-started#supyfit).
-
-
-The user must download the full superfit folder and place the bank inside it, also any spectra to be analyzed. The user only changes the parameters from the json file already within the folder, the following is an explanation of the parameters.
-
-### Where the template bank is looked for
-
-NGSF finds the bank by checking, in order:
-
-1. `$NGSF_BANK_DIR`, if set;
-2. `./bank` relative to the working directory;
-3. `bank/` next to the installed `NGSF` package.
-
-If none exist it says so and names the paths it tried, rather than failing
-later with a confusing file-not-found.
-
-### Command line
-
-    superfit parameters.json          # installed entry point
-    python run.py parameters.json     # equivalent, from a source checkout
-
-Anything in the JSON can be overridden per-run without editing the file:
-
-    superfit parameters.json --object spectrum.flm --out results/ --no-plots
-    superfit parameters.json --resolution 30
-    superfit parameters.json --n-cores 16 --weighted-solve
-
-### From Python
-
-Importing NGSF does not require command-line arguments, so it can be driven
-from a script or notebook:
-
-```python
-from NGSF.sf_class import Superfit
-
-fit = Superfit("parameters.json")        # or a plain dict
-fit.superfit()
-print(fit.results.head())
+```bash
+pytest                      # everything, ~30s
+pytest -m "not endtoend"    # skip the tests that need the template bank
 ```
 
+Six groups:
+
+- `test_core_kernel.py` pins the fitting linear algebra against an
+  independent loop-based reference, so optimisation work can be checked
+  against something other than itself.
+- `test_robustness.py` drives extreme inputs — cosmic rays, NaN gaps,
+  interpolated-flat stretches, spectra straddling zero — through the error
+  and binning routines.
+- `test_spectrum.py` and `test_config.py` cover the input handling.
+- `test_api.py` fits the same data as a file, as arrays, as a `Spectrum`
+  and as a raw array, and asserts the four agree.
+- `test_regression.py` runs the real pipeline over the real bank and
+  compares against a committed golden result, separating "which template
+  won and in what order" from "what were the numbers".
+
+If you change the science on purpose, regenerate the golden file in the same
+commit and say why:
+
+```bash
+python superfit/tests/test_regression.py --regenerate
+```
+
+## Building a release
+
+```bash
+python -m build
+python -m twine check dist/*
+```
+
+The template bank must never end up in the sdist; CI greps for it and fails
+the build if it does.
 
 ## The parameters of the fit
 
-The user must only change the parameters of the fit from the parameters.json file, the file looks like this (the template for this example is included in the git)
+Every key below can be set in a JSON file, in a dict, or as a keyword to
+`Superfit`, and every one has a default. A full parameters.json looks like
+this (the example spectrum is included in the repository):
 
 
     "object_to_fit" : "SN2021urb_2021-08-06_00-00-00_Keck1_LRIS_TNS.flm",
@@ -221,73 +323,47 @@ A parameter pinned to the edge of its range is a boundary artefact, not a
 measurement. Widen `Alam_low`/`Alam_high` (or the redshift range) and refit.
 
 
-## To Run
-
-Once the parameters have been updated in the `parameters.json` file the user simply needs to run the script from the `run.py` file.
-
-It is important to note that the file of the object to be analyzed should be within the superfit folder.
-
-
-## Tests
-
-    pytest                      # everything, ~10s
-    pytest -m "not endtoend"    # skip the tests that need the template bank
-
-Three groups:
-
-- `test_core_kernel.py` pins the fitting linear algebra against an
-  independent loop-based reference, so optimisation work can be checked
-  against something other than itself.
-- `test_robustness.py` drives extreme inputs — cosmic rays, NaN gaps,
-  interpolated-flat stretches, spectra straddling zero — through the error
-  and binning routines.
-- `test_regression.py` runs the real pipeline over the real bank and
-  compares against a committed golden result, separating "which template won
-  and in what order" from "what were the numbers".
-
-If you change the science on purpose, regenerate the golden file in the same
-commit and say why:
-
-    python NGSF/tests/test_regression.py --regenerate
-
-
-
-
 # Further details about the code
 
 
 ## New template bank
 
-The improved Superfit template bank contains major subclasses such as: calcium rich supernovae, type II flashers, TDEs, SLSN-I and II, among others, separated in different folders for more accurate classification. The default option for binning in 10A.
-The user must make sure to have this template bank or some alternative template bank of his own in order to run pySF, and please be mindful that pySF is only as good as the template bank it uses.
+The superfit template bank contains major subclasses such as: calcium rich supernovae, type II flashers, TDEs, SLSN-I and II, among others, separated in different folders for more accurate classification. The default option for binning in 10A.
+The user must make sure to have this template bank or some alternative template bank of his own in order to run superfit, and please be mindful that superfit is only as good as the template bank it uses.
 
 
-The user has the option to create a bank with masked lines, meaning to mask host galaxy lines that could be in the templates, this option is default to False. If the user is interested in seeing which lines are being masked he can access the `mask_lines_bank` function within the `Header_binnings.py` file.
+The user has the option to create a bank with masked lines, meaning to mask host galaxy lines that could be in the templates, this option is default to False. If the user is interested in seeing which lines are being masked he can access the `mask_lines_bank` function within the `superfit/Header_Binnings.py` file.
 
 It is important to note that when you open the folder of the bank there are two main subfolders, one named "original_resolution" and one named "binnings".
 The "original_resolution" folder contains the raw spectra from the bank, with the wavelengths in observed frame. In the "binnings" folder we have the binned and redshift-corrected spectra from the "original_resolution" folder, and so the fits are done using the "binnings" folder.
 Within the object subfolders inside the "original_resolution" folder we will find the wiserep files containing the metadata for each object (name,redshift, observational date, etc.) we use this metadata during the fit, and so we keep the folder.
 
 
-## Main NGSF Function
+## How a fit is put together
 
-In the `sf_class.py` file we find the main function which looks like this:
+`Superfit.run()` prepares the observation and then hands it to
+`all_parameter_space`, which evaluates every (redshift, A_v) grid point
+across a process pool. Within a grid point, `solve_grid` fits every
+(galaxy, supernova) pair at once as a set of matrix products and scores each
+with chi2 — that is where nearly all the time goes.
 
-
-```ruby
-
-all_parameter_space(self.int_obj,Parameters.redshift,Parameters.extconstant,Parameters.templates_sn_trunc,
-                    Parameters.templates_gal_trunc, Parameters.lam, Parameters.resolution,Parameters.iterations,
-                    kind=Parameters.kind, original= self.binned_name, save=self.results_name, show=show,
-                    minimum_overlap=Parameters.minimum_overlap)
+Roughly:
 
 ```
+Spectrum  ──▶  mask host lines / telluric  ──▶  normalise  ──▶  int_obj
+    │                                                             │
+    └──▶  bin to `resolution`  ──▶  error model  ──▶  sigma       │
+                                                        │         │
+                          all_parameter_space  ◀────────┴─────────┘
+                                    │
+                    for each (z, A_v):  solve_grid  ──▶  top `iterations`
+                                    │
+                          rank, dedupe by SN, write CSV
+```
 
+The quantities involved:
 
-
-The inputs of the function are called from the Parameters class within the `params.py` file, and are as follow:
-
-- `self.int_obj`: interpolated object to fit
+- `int_obj`: interpolated object to fit
 - `redshift:` Can be an array or an individual number. These are the redshift values over which to optimize.
 - `extconstant`: Array of values over which to optimize for the extinction constant. The user does not change this.
 - `templates_sn_trunc:`  Truncated library of supernovae, aka: which SN types to look at when optimizing.
