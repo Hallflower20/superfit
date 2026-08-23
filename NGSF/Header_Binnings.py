@@ -1,3 +1,6 @@
+import math
+import warnings
+
 import numpy as np
 from astropy import table
 from scipy import stats
@@ -74,6 +77,48 @@ def kill_header(file_name):
     return spectrum
 
 
+def normalise_flux(flux):
+    """Divide flux by its median, guarding the case where that median is ~0.
+
+    A continuum-subtracted or sky-dominated spectrum can have a median
+    indistinguishable from zero, and dividing by it amplified the spectrum by
+    ~1e15. Fall back to the scatter when that happens.
+    """
+
+    flux = np.asarray(flux, dtype=float)
+    finite = flux[np.isfinite(flux)]
+
+    if finite.size == 0:
+        raise ValueError("spectrum has no finite flux values")
+
+    median = np.median(finite)
+    mad = np.median(np.abs(finite - median))
+
+    if np.abs(median) > 1e-3 * mad and median != 0:
+        return flux / median
+
+    warnings.warn(
+        "median flux ({:.3g}) is negligible next to its scatter ({:.3g}); "
+        "normalising by the scatter instead of the median".format(median, mad),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+    if mad > 0:
+        return flux / (1.4826 * mad)
+
+    raise ValueError("spectrum flux is constant; cannot normalise it")
+
+
+def median_spacing(lam):
+    """Typical wavelength step, robust to a few irregular pixels."""
+
+    lam = np.asarray(lam, dtype=float)
+    if lam.size < 2:
+        raise ValueError("spectrum needs at least two wavelength samples")
+    return float(np.median(np.diff(lam)))
+
+
 def bin_spectrum(spectrum, resolution):
 
     """
@@ -94,10 +139,21 @@ def bin_spectrum(spectrum, resolution):
         fluxerror = spectrum[:, 2]
     else:
         fluxerror = None
-    if lam[15] - lam[16] > resolution:
-        bin_spectra = spectrum
+
+    # If the data are already coarser than the requested bin, rebinning would
+    # invent structure that was never measured; hand them back as they are.
+    # The old test read lam[15] - lam[16], which is negative for any ascending
+    # wavelength axis, so this branch never ran -- and returned None when it
+    # notionally did, because it had no return statement.
+    if median_spacing(lam) >= resolution:
+        passthrough = table.Table()
+        passthrough["lam_bin"] = lam
+        passthrough["bin_flux"] = normalise_flux(flux)
+        if fluxerror is not None:
+            passthrough["bin_fluxerror"] = fluxerror / np.nanmedian(flux)
+        return passthrough
     else:
-        number_of_bins = np.math.floor((lam[-1] - lam[0]) / resolution)
+        number_of_bins = math.floor((lam[-1] - lam[0]) / resolution)
         flux_bin, bin_edge, index = stats.binned_statistic(
             lam,
             flux,
@@ -209,11 +265,13 @@ def bin_spectrum_bank(spectrum, resolution):
     lam = spectrum[:, 0]
     flux = spectrum[:, 1]
 
-    if lam[15] - lam[16] > resolution:
-        bin_spectra = spectrum
+    # See bin_spectrum: this guard used to be unreachable and indexed lam[15]
+    # unconditionally, which raised IndexError on any spectrum under 17 pixels.
+    if median_spacing(lam) >= resolution:
+        return np.column_stack([lam, normalise_flux(flux)])
 
     else:
-        number_of_bins = np.math.floor((lam[-1] - lam[0]) / resolution)
+        number_of_bins = math.floor((lam[-1] - lam[0]) / resolution)
         flux_bin, bin_edge, index = stats.binned_statistic(
             lam,
             flux,

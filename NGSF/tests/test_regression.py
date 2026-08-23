@@ -29,6 +29,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+if __name__ == "__main__" and __package__ is None:
+    # Allow `python NGSF/tests/test_regression.py --regenerate` from anywhere.
+    sys.path.insert(
+        0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
+
 from NGSF.tests.conftest import GOLDEN, REPO, TEST_SPECTRUM, needs_bank
 
 GOLDEN_CSV = os.path.join(GOLDEN, "SN2021urb_exact_z_10A.csv")

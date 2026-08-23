@@ -3,6 +3,7 @@ from scipy import interpolate
 import extinction
 from extinction import apply
 from astropy import table
+from astropy.table import Table
 from astropy.io import ascii
 import contextlib
 import itertools
@@ -19,6 +20,7 @@ from NGSF.Header_Binnings import (
     kill_header,
     mask_host_lines,
     mask_lines_bank,
+    normalise_flux,
 )
 from NGSF.paths import binning_dir
 
@@ -79,21 +81,26 @@ def sn_hg_arrays(
     return sn, gal
 
 
+# The telluric A band, in Angstroms.
+TELLURIC_BAND = (7594.0, 7680.0)
+
+
 def remove_telluric(spectrum):
+    """Blank the telluric A band, returning a new array.
 
-    lam = spectrum[:, 0]
-    flux = spectrum[:, 1]
+    The previous version wrote a -10000 sentinel into the caller's own array
+    and then mapped every -10000 in the spectrum to NaN, so it both destroyed
+    its input and masked any genuine flux that happened to equal -10000.
+    Extra columns (a shipped error spectrum) are now carried through instead
+    of being dropped.
+    """
 
-    for i in range(0, len(lam)):
+    out = np.array(spectrum, dtype=float, copy=True)
 
-        if 7594 <= lam[i] <= 7680:
+    in_band = (out[:, 0] >= TELLURIC_BAND[0]) & (out[:, 0] <= TELLURIC_BAND[1])
+    out[in_band, 1] = np.nan
 
-            flux[i] = -10000
-
-        array1 = flux
-        flux_no_tell = np.where(array1 == -10000, np.nan, array1)
-
-    return np.array([lam, flux_no_tell]).T
+    return out
 
 
 def Alam(lamin, A_v=1, R_v=3.1):
@@ -144,7 +151,7 @@ def error_obj(kind, lam, object_to_fit):
     else:
         object_spec = np.loadtxt(object_to_fit)
     
-    object_spec[:, 1] = object_spec[:, 1] / np.nanmedian(object_spec[:, 1])
+    object_spec[:, 1] = normalise_flux(object_spec[:, 1])
 
     #print(kind)
     #print(len(object_spec[1, :]))

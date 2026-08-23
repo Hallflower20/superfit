@@ -9,7 +9,7 @@ from astropy.table import Table
 
 
 from NGSF.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
-from NGSF.Header_Binnings import kill_header, kill_header_and_bin
+from NGSF.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
 from NGSF.error_routines import linear_error, savitzky_golay
 from NGSF.get_metadata import get_metadata
 from NGSF.params import parameters, get_parameters, set_config
@@ -92,7 +92,7 @@ class Superfit:
             else:
                 object_spec = np.loadtxt(self.original_path_name)
 
-        object_spec[:, 1] = object_spec[:, 1] / np.nanmedian(object_spec[:, 1])
+        object_spec[:, 1] = normalise_flux(object_spec[:, 1])
 
         int_obj = interpolate.interp1d(
             object_spec[:, 0], object_spec[:, 1], bounds_error=False, fill_value="nan"
