@@ -1,7 +1,0 @@
-astropy
-extinction
-matplotlib
-numpy
-pandas
-PyAstronomy
-scipy
