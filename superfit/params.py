@@ -148,6 +148,10 @@ class Parameters:
         alam_num = int((self.Alam_high - self.Alam_low) / self.Alam_interval) + 1
         self.extconstant = np.linspace(self.Alam_low, self.Alam_high, alam_num)
 
+        # Shape of the CCM89 curve the A_v grid scales. Applied at the
+        # template's rest wavelength, so A_v is host-galaxy dust.
+        self.R_v = data["R_v"]
+
         # Library to look at
         self.temp_gal_tr = data["temp_gal_tr"]
         self.temp_sn_tr = data["temp_sn_tr"]

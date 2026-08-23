@@ -444,11 +444,30 @@ class TestRedshiftedModels:
         expected = 10 ** (-0.4 * Alam(grid.wavelength))
         np.testing.assert_allclose(ratio, expected, rtol=1e-12)
 
-        # Only the shape of the curve is asserted here; whether it points the
-        # right way is a separate, pre-existing question -- see
-        # TestExtinctionLawIsInverted below.
         assert (ratio > 0).all()
         assert (ratio <= 1).all()
+
+        # And it points the right way: positive A_v takes away more blue
+        # light than red. See TestExtinctionLaw below.
+        assert ratio[0] < ratio[-1]
+
+    def test_r_v_changes_the_shape_of_the_reddening(self):
+        """R_v is threaded through from the config, not pinned at 3.1."""
+
+        grid = self._grid()
+        sn_bank, gal_bank, *_ = self._banks(grid)
+
+        default, _ = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 1.0)
+        steeper, _ = redshifted_models(
+            sn_bank, gal_bank, grid.wavelength, 0.0, 1.0, R_v=2.1
+        )
+
+        np.testing.assert_allclose(
+            steeper[0, 0] / default[0, 0],
+            10 ** (-0.4 * (Alam(grid.wavelength, R_v=2.1) - Alam(grid.wavelength))),
+            rtol=1e-12,
+        )
+        assert not np.allclose(steeper[0, 0], default[0, 0])
 
     def test_galaxy_templates_ignore_extinction(self):
         grid = self._grid()
@@ -487,49 +506,110 @@ class TestRedshiftedModels:
         assert np.isfinite(sn[0, 0]).any()
 
 
-class TestExtinctionLawIsInverted:
-    """A pre-existing defect, documented here rather than fixed.
+class TestExtinctionLaw:
+    """``Alam`` returns A_lambda in magnitudes, and every caller relies on it.
 
-    ``Alam`` is named as if it returned A_lambda in magnitudes, but it returns
-    ``extinction.apply(ccm89(...), ones)``, which is the *transmission*
-    ``10 ** (-0.4 * A_lambda)``. The fit then raises that to the same power
-    again, computing ``10 ** (-0.4 * A_v * transmission)``.
+    Callers form the transmission themselves, as
+    ``10 ** (-0.4 * A_v * Alam(lam))``. That is only correct if ``Alam``
+    hands back magnitudes. It used to return
+    ``extinction.apply(ccm89(...), ones)``, the *transmission*
+    ``10 ** (-0.4 * A_lambda)``, so the callers exponentiated a second time
+    and the resulting curve removed more red light than blue -- reddening ran
+    backwards, and negative A_v was doing the work extinction should.
 
-    The consequence is not a small scaling error: the resulting curve removes
-    more red light than blue, so the "extinction" axis reddens backwards. It
-    plausibly explains why best fits pile up at negative A_v -- negative values
-    are doing the work positive extinction should.
-
-    Fixing it changes every result, so it belongs in its own change with its
-    own golden regeneration, not in the log-binning work. These are strict
-    xfails: they will start failing the moment it is corrected.
+    ``test_doubling_av_squares_the_transmission`` is the sharpest test here:
+    the law is linear in A_v in magnitudes, and the double exponentiation
+    broke exactly that. Anything that reintroduces an extra ``10 ** ...``
+    fails it.
     """
 
     WAVELENGTHS = np.array([3500.0, 5500.0, 9000.0])
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Alam returns 10**(-0.4*A_lambda), a transmission, not A_lambda",
-    )
-    def test_alam_returns_magnitudes(self):
+    @pytest.mark.parametrize("A_v", [0.5, 1.0, 2.5])
+    @pytest.mark.parametrize("R_v", [2.1, 3.1, 4.5])
+    def test_alam_is_exactly_ccm89_in_magnitudes(self, A_v, R_v):
         import extinction
 
         np.testing.assert_allclose(
-            Alam(self.WAVELENGTHS),
-            extinction.ccm89(self.WAVELENGTHS, 1.0, 3.1),
-            rtol=1e-6,
+            Alam(self.WAVELENGTHS, A_v, R_v),
+            extinction.ccm89(self.WAVELENGTHS, A_v, R_v),
+            rtol=1e-12,
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the doubly-exponentiated law attenuates the red more than the blue",
-    )
     def test_positive_extinction_removes_more_blue_than_red(self):
         transmission = 10 ** (-0.4 * 1.0 * Alam(self.WAVELENGTHS))
         assert transmission[0] < transmission[-1]
 
-    def test_current_behaviour_is_the_inverted_curve(self):
-        """Pins what the code does today, so a fix cannot slip in unnoticed."""
+    def test_reddening_is_monotonic_across_the_optical(self):
+        lam = np.linspace(3500.0, 9000.0, 2000)
+        transmission = 10 ** (-0.4 * 1.0 * Alam(lam))
 
-        transmission = 10 ** (-0.4 * 1.0 * Alam(self.WAVELENGTHS))
-        assert transmission[0] > transmission[-1]
+        # More extinction at every step towards the blue, no local reversals.
+        assert (np.diff(transmission) > 0).all()
+
+    def test_zero_extinction_is_exactly_the_identity(self):
+        transmission = 10 ** (-0.4 * 0.0 * Alam(self.WAVELENGTHS))
+        np.testing.assert_array_equal(transmission, np.ones(len(self.WAVELENGTHS)))
+
+    def test_doubling_av_squares_the_transmission(self):
+        """The law is linear in A_v; double exponentiation broke this."""
+
+        once = 10 ** (-0.4 * 1.0 * Alam(self.WAVELENGTHS))
+        twice = 10 ** (-0.4 * 2.0 * Alam(self.WAVELENGTHS))
+        np.testing.assert_allclose(twice, once**2, rtol=1e-12)
+
+    def test_av_scales_out_of_the_curve(self):
+        """``Alam(lam, A_v)`` is ``A_v * Alam(lam)``, which is why the
+        callers may pass A_v as a multiplier instead of an argument."""
+
+        np.testing.assert_allclose(
+            Alam(self.WAVELENGTHS, 1.7), 1.7 * Alam(self.WAVELENGTHS), rtol=1e-12
+        )
+
+    def test_accepts_a_python_list(self):
+        """Callers pass plain sequences; ccm89 itself demands float64."""
+
+        np.testing.assert_allclose(
+            Alam([3500.0, 9000.0]), Alam(np.array([3500.0, 9000.0])), rtol=1e-12
+        )
+
+
+class TestPlottingReconstructsTheFittedModel:
+    """The output plots rebuild the best-fit model independently of the fit.
+
+    ``sf_class._plot_best_fits`` and ``sf_class.any_result`` redden the
+    template themselves rather than reusing what the fitter produced. If the
+    two disagree, the published plot shows a different model than the one that
+    was scored. This pins them together.
+    """
+
+    @staticmethod
+    def _template():
+        lam_t = np.linspace(2500.0, 12000.0, 3000)
+        return lam_t, 1.0 + 0.2 * np.sin(lam_t / 300.0)
+
+    @pytest.mark.parametrize("z", [0.0, 0.127, 0.3])
+    @pytest.mark.parametrize("A_v", [-1.0, 0.0, 1.2])
+    def test_the_two_reddenings_agree(self, z, A_v):
+        from scipy import interpolate
+
+        grid = LogGrid.spanning(3500.0, 9000.0, velocity_to_dlnlam(400.0))
+        lam_t, flux_t = self._template()
+
+        # What the fitter builds: redden at lam / (1 + z), on the log grid.
+        bank = RedshiftableTemplates.from_templates([lam_t], [flux_t], grid, 0.5)
+        sn, _ = redshifted_models(bank, bank, grid.wavelength, z, A_v)
+        fitted = sn[0, 0]
+
+        # What the plotting path builds: redden at the template's own
+        # wavelength, then shift and interpolate onto the same grid.
+        extinct = flux_t * 10 ** (-0.4 * A_v * Alam(lam_t)) / (1 + z)
+        plotted = interpolate.interp1d(
+            lam_t * (1 + z), extinct, bounds_error=False, fill_value=np.nan
+        )(grid.wavelength)
+
+        finite = np.isfinite(fitted) & np.isfinite(plotted)
+        assert finite.sum() > 100
+        np.testing.assert_allclose(
+            fitted[finite], plotted[finite], rtol=5e-3, atol=5e-3
+        )
