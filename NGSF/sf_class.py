@@ -12,15 +12,25 @@ from NGSF.SF_functions import Alam, all_parameter_space, remove_telluric, mask_g
 from NGSF.Header_Binnings import kill_header, kill_header_and_bin
 from NGSF.error_routines import linear_error, savitzky_golay
 from NGSF.get_metadata import Metadata
-from NGSF.params import Parameters, data
+from NGSF.params import parameters, get_parameters, set_config
 from NGSF.paths import gal_dir, sne_dir
 
 
-parameters = Parameters(data)
-
 
 class Superfit:
-    def __init__(self):
+    def __init__(self, config=None):
+        """Set up a fit.
+
+        Parameters
+        ----------
+        config : dict, str or None
+            A parameter dict, a JSON string, or a path to a JSON file. When
+            omitted the configuration already loaded into :mod:`NGSF.params`
+            is used -- which is what happens for ``python run.py params.json``.
+        """
+
+        if config is not None:
+            set_config(config)
 
         self.original_path_name = parameters.object_to_fit
         self.name = os.path.basename(self.original_path_name)
@@ -92,8 +102,11 @@ class Superfit:
         self.metadata = Metadata()
 
         # Make json with the used parameters
-        with open(parameters.save_results_path + "{}_used.json".format(parameters.object_to_fit.split("/")[-1].split(".")[0]), "w") as fp:
-            json.dump(data, fp)
+        used_json = parameters.save_results_path + "{}_used.json".format(
+            self.name_no_extension
+        )
+        with open(used_json, "w") as fp:
+            json.dump(parameters.config, fp, indent=2)
 
     def plot(self):
 

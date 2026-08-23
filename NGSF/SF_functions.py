@@ -14,14 +14,12 @@ cores = 16
 
 from NGSF.get_metadata import Metadata
 from NGSF.error_routines import savitzky_golay, linear_error
-from NGSF.params import Parameters, data
+from NGSF.params import parameters
 from NGSF.Header_Binnings import bin_spectrum_bank, mask_lines_bank, kill_header
 from NGSF.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
 
-
-parameters = Parameters(data)
 
 
 def sn_hg_arrays(

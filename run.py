@@ -1,4 +1,71 @@
-from NGSF.sf_class import Superfit
+#!/usr/bin/env python
+"""Command-line entry point for NGSF.
 
-supernova = Superfit()
-supernova.superfit()
+    python run.py parameters.json
+    python run.py parameters.json --object spectrum.flm --out results/
+"""
+
+import argparse
+import sys
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        description="Fit a supernova spectrum against the NGSF template bank.",
+    )
+    parser.add_argument(
+        "config",
+        help="Path to a JSON parameter file (or a JSON string).",
+    )
+    parser.add_argument(
+        "--object",
+        dest="object_to_fit",
+        help="Override object_to_fit from the config.",
+    )
+    parser.add_argument(
+        "--out",
+        dest="saving_results_path",
+        help="Override saving_results_path from the config.",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        help="Override the binning resolution in Angstroms.",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip plotting entirely (sets how_many_plots to 0).",
+    )
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+
+    from NGSF.params import load_config
+
+    config = load_config(args.config)
+
+    if args.object_to_fit is not None:
+        config["object_to_fit"] = args.object_to_fit
+    if args.saving_results_path is not None:
+        path = args.saving_results_path
+        # Downstream code concatenates this prefix onto file names.
+        config["saving_results_path"] = path if path.endswith("/") else path + "/"
+    if args.resolution is not None:
+        config["resolution"] = args.resolution
+    if args.no_plots:
+        config["how_many_plots"] = 0
+        config["show_plot"] = 0
+
+    from NGSF.sf_class import Superfit
+
+    supernova = Superfit(config)
+    supernova.superfit()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

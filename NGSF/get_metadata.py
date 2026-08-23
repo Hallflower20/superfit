@@ -4,7 +4,7 @@ from astropy.io import ascii
 import os
 import pandas as pd
 import csv
-from NGSF.params import Parameters, data
+from NGSF.params import get_parameters
 from NGSF.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
@@ -27,7 +27,7 @@ class Metadata(object):
 
     def __init__(self):
 
-        parameters = Parameters(data)
+        parameters = get_parameters()
 
         mjd_max_brightness = MJD_MAX_BRIGHTNESS_CSV
 
