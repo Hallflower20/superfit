@@ -6,3 +6,4 @@ results
 __pycache__/
 *.pyc
 .pytest_cache/
+NGSF/tests/data/*.json
