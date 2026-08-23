@@ -16,7 +16,8 @@ which is exactly the signal we want.
 import numpy as np
 import pytest
 
-from superfit.SF_functions import sn_hg_arrays, solve_grid
+from superfit.SF_functions import Alam, redshifted_models, solve_grid
+from superfit.loggrid import LogGrid, RedshiftableTemplates, velocity_to_dlnlam
 
 
 def reference_solution(int_obj, sn, gal, sigma, minimum_overlap=0.7):
@@ -366,91 +367,169 @@ class TestSolveGrid:
             np.testing.assert_array_equal(got, want)
 
 
-class TestSnHgArrays:
-    """``sn_hg_arrays`` resamples templates onto the observed grid."""
 
-    def _bank(self):
-        lam_t = np.linspace(3000.0, 9000.0, 400)
-        sn_t = {"a": np.column_stack([lam_t, 1.0 + 0.2 * np.sin(lam_t / 300.0)])}
-        gal_t = {"g": np.column_stack([lam_t, 2.0 + 0.1 * np.cos(lam_t / 400.0)])}
-        alam = {"a": np.ones_like(lam_t)}
-        return sn_t, gal_t, alam
+
+class TestRedshiftedModels:
+    """Assembling the model grid at one (redshift, extinction) point.
+
+    These are the properties the old linear-grid ``sn_hg_arrays`` guaranteed,
+    restated against the log-grid path that replaced it.
+    """
+
+    @staticmethod
+    def _banks(observed_grid, max_z=0.5):
+        lam_t = np.linspace(2500.0, 12000.0, 3000)
+        sn_flux = 1.0 + 0.2 * np.sin(lam_t / 300.0)
+        gal_flux = 2.0 + 0.1 * np.cos(lam_t / 400.0)
+
+        sn_bank = RedshiftableTemplates.from_templates(
+            [lam_t], [sn_flux], observed_grid, max_z
+        )
+        gal_bank = RedshiftableTemplates.from_templates(
+            [lam_t], [gal_flux], observed_grid, max_z
+        )
+        return sn_bank, gal_bank, lam_t, sn_flux, gal_flux
+
+    @staticmethod
+    def _grid():
+        return LogGrid.spanning(3500.0, 9000.0, velocity_to_dlnlam(400.0))
 
     def test_shapes_broadcast_into_a_grid(self):
-        sn_t, gal_t, alam = self._bank()
-        lam = np.linspace(4000.0, 8000.0, 100)
+        grid = self._grid()
+        sn_bank, gal_bank, *_ = self._banks(grid)
 
-        sn, gal = sn_hg_arrays(0.0, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+        sn, gal = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 0.0)
 
-        assert sn.shape == (1, 1, 100)
-        assert gal.shape == (1, 1, 100)
-        assert (sn * gal).shape == (1, 1, 100)
+        n = len(grid)
+        assert sn.shape == (1, 1, n)
+        assert gal.shape == (1, 1, n)
+        assert (sn * gal).shape == (1, 1, n)
 
-    def test_zero_redshift_zero_extinction_is_plain_interpolation(self):
-        sn_t, gal_t, alam = self._bank()
-        lam = np.linspace(4000.0, 8000.0, 100)
+    def test_zero_redshift_zero_extinction_is_plain_resampling(self):
+        grid = self._grid()
+        sn_bank, gal_bank, lam_t, sn_flux, _ = self._banks(grid)
 
-        sn, _ = sn_hg_arrays(0.0, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+        sn, _ = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 0.0)
 
         expected = np.interp(
-            lam, sn_t["a"][:, 0], sn_t["a"][:, 1], left=np.nan, right=np.nan
+            grid.wavelength, lam_t, sn_flux, left=np.nan, right=np.nan
         )
-        np.testing.assert_allclose(sn[0, 0], expected, rtol=1e-12)
+        np.testing.assert_allclose(sn[0, 0], expected, rtol=1e-3, atol=1e-3)
 
     def test_redshift_stretches_and_dims(self):
-        """A redshifted template is shifted in lambda and divided by (1 + z)."""
+        """Flux is divided by (1 + z) and features move to longer wavelength."""
 
-        sn_t, gal_t, alam = self._bank()
-        lam = np.linspace(4000.0, 8000.0, 100)
+        grid = self._grid()
+        sn_bank, gal_bank, lam_t, sn_flux, _ = self._banks(grid)
         z = 0.1
 
-        sn, _ = sn_hg_arrays(z, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+        sn, _ = redshifted_models(sn_bank, gal_bank, grid.wavelength, z, 0.0)
 
-        expected = np.interp(
-            lam,
-            sn_t["a"][:, 0] * (1 + z),
-            sn_t["a"][:, 1] / (1 + z),
-            left=np.nan,
-            right=np.nan,
+        expected = (
+            np.interp(
+                grid.wavelength / (1 + z), lam_t, sn_flux, left=np.nan, right=np.nan
+            )
+            / (1 + z)
         )
-        np.testing.assert_allclose(sn[0, 0], expected, rtol=1e-12)
+        np.testing.assert_allclose(sn[0, 0], expected, rtol=5e-3, atol=5e-3)
 
-    def test_extinction_scales_the_flux(self):
-        sn_t, gal_t, alam = self._bank()
-        lam = np.linspace(4000.0, 8000.0, 100)
+    def test_extinction_reddens_the_supernova(self):
+        grid = self._grid()
+        sn_bank, gal_bank, *_ = self._banks(grid)
 
-        unextincted, _ = sn_hg_arrays(0.0, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
-        extincted, _ = sn_hg_arrays(0.0, 1.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+        clear, _ = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 0.0)
+        reddened, _ = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 1.0)
 
-        # alam is 1 everywhere in this bank, so the ratio is a single constant.
-        ratio = extincted[0, 0] / unextincted[0, 0]
-        np.testing.assert_allclose(ratio, 10 ** (-0.4), rtol=1e-12)
+        ratio = reddened[0, 0] / clear[0, 0]
+        expected = 10 ** (-0.4 * Alam(grid.wavelength))
+        np.testing.assert_allclose(ratio, expected, rtol=1e-12)
+
+        # Only the shape of the curve is asserted here; whether it points the
+        # right way is a separate, pre-existing question -- see
+        # TestExtinctionLawIsInverted below.
+        assert (ratio > 0).all()
+        assert (ratio <= 1).all()
 
     def test_galaxy_templates_ignore_extinction(self):
-        """Only the supernova is reddened; the host is not."""
+        grid = self._grid()
+        sn_bank, gal_bank, *_ = self._banks(grid)
 
-        sn_t, gal_t, alam = self._bank()
-        lam = np.linspace(4000.0, 8000.0, 100)
-
-        _, gal_a = sn_hg_arrays(0.05, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
-        _, gal_b = sn_hg_arrays(0.05, 2.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+        _, gal_a = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.05, 0.0)
+        _, gal_b = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.05, 2.0)
 
         np.testing.assert_array_equal(gal_a, gal_b)
 
+    def test_galaxy_is_still_dimmed_by_redshift(self):
+        grid = self._grid()
+        sn_bank, gal_bank, *_ = self._banks(grid)
 
-@pytest.mark.parametrize("z", [0.0, 0.05, 0.2])
-def test_templates_off_the_grid_become_nan_not_zero(z):
-    """Extrapolation must produce NaN so nansum drops it, not 0 which would score well."""
+        _, at_rest = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.0, 0.0)
+        _, at_z = redshifted_models(sn_bank, gal_bank, grid.wavelength, 0.5, 0.0)
 
-    lam_t = np.linspace(5000.0, 6000.0, 50)
-    sn_t = {"a": np.column_stack([lam_t, np.ones_like(lam_t)])}
-    gal_t = {"g": np.column_stack([lam_t, np.ones_like(lam_t)])}
-    alam = {"a": np.ones_like(lam_t)}
+        finite = np.isfinite(at_rest) & np.isfinite(at_z)
+        assert at_z[finite].max() < at_rest[finite].max()
 
-    lam = np.linspace(4000.0, 8000.0, 200)
-    sn, gal = sn_hg_arrays(z, 0.0, lam, ["a"], sn_t, ["g"], gal_t, alam)
+    @pytest.mark.parametrize("z", [0.0, 0.05, 0.2])
+    def test_templates_off_the_grid_become_nan_not_zero(self, z):
+        """Extrapolation must be NaN so nansum drops it; 0 would score well."""
 
-    assert np.isnan(sn[0, 0, 0])
-    assert np.isnan(sn[0, 0, -1])
-    assert np.isnan(gal[0, 0, 0])
-    assert np.isfinite(sn[0, 0]).any()
+        grid = LogGrid.spanning(4000.0, 8000.0, velocity_to_dlnlam(400.0))
+        lam_t = np.linspace(5000.0, 6000.0, 500)
+        bank = RedshiftableTemplates.from_templates(
+            [lam_t], [np.ones_like(lam_t)], grid, 0.5
+        )
+
+        sn, gal = redshifted_models(bank, bank, grid.wavelength, z, 0.0)
+
+        assert np.isnan(sn[0, 0, 0])
+        assert np.isnan(sn[0, 0, -1])
+        assert np.isnan(gal[0, 0, 0])
+        assert np.isfinite(sn[0, 0]).any()
+
+
+class TestExtinctionLawIsInverted:
+    """A pre-existing defect, documented here rather than fixed.
+
+    ``Alam`` is named as if it returned A_lambda in magnitudes, but it returns
+    ``extinction.apply(ccm89(...), ones)``, which is the *transmission*
+    ``10 ** (-0.4 * A_lambda)``. The fit then raises that to the same power
+    again, computing ``10 ** (-0.4 * A_v * transmission)``.
+
+    The consequence is not a small scaling error: the resulting curve removes
+    more red light than blue, so the "extinction" axis reddens backwards. It
+    plausibly explains why best fits pile up at negative A_v -- negative values
+    are doing the work positive extinction should.
+
+    Fixing it changes every result, so it belongs in its own change with its
+    own golden regeneration, not in the log-binning work. These are strict
+    xfails: they will start failing the moment it is corrected.
+    """
+
+    WAVELENGTHS = np.array([3500.0, 5500.0, 9000.0])
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Alam returns 10**(-0.4*A_lambda), a transmission, not A_lambda",
+    )
+    def test_alam_returns_magnitudes(self):
+        import extinction
+
+        np.testing.assert_allclose(
+            Alam(self.WAVELENGTHS),
+            extinction.ccm89(self.WAVELENGTHS, 1.0, 3.1),
+            rtol=1e-6,
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the doubly-exponentiated law attenuates the red more than the blue",
+    )
+    def test_positive_extinction_removes_more_blue_than_red(self):
+        transmission = 10 ** (-0.4 * 1.0 * Alam(self.WAVELENGTHS))
+        assert transmission[0] < transmission[-1]
+
+    def test_current_behaviour_is_the_inverted_curve(self):
+        """Pins what the code does today, so a fix cannot slip in unnoticed."""
+
+        transmission = 10 ** (-0.4 * 1.0 * Alam(self.WAVELENGTHS))
+        assert transmission[0] > transmission[-1]

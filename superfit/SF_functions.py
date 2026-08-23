@@ -22,63 +22,40 @@ from superfit.Header_Binnings import (
     mask_lines_bank,
     normalise_flux,
 )
+from superfit.loggrid import RedshiftableTemplates
 from superfit.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
 
 
 
-def sn_hg_arrays(
-    z,
-    extcon,
-    lam,
-    templates_sn_trunc,
-    templates_sn_trunc_dict,
-    templates_gal_trunc,
-    templates_gal_trunc_dict,
-    alam_dict,
-):
+def redshifted_models(sn_bank, gal_bank, lam, z, extcon):
+    """Supernova and galaxy models at one (redshift, extinction) point.
 
-    #print(templates_sn_trunc)
+    Returns ``(sn, gal)`` shaped (1, n_sn, n_lam) and (n_gal, 1, n_lam), ready
+    to broadcast into the chi2 grid.
 
-    sn = []
-    gal = []
-    for i in range(0, len(templates_sn_trunc)):
+    Both banks are dimmed by (1 + z). Only the supernova is reddened, and the
+    extinction law is evaluated at the rest wavelength each observed pixel
+    corresponds to, ``lam / (1 + z)``.
 
-        one_sn = templates_sn_trunc_dict[templates_sn_trunc[i]]
-        a_lam_sn = alam_dict[templates_sn_trunc[i]]
-        redshifted_sn = one_sn[:, 0] * (z + 1)
-        extinct_excon = one_sn[:, 1] * 10 ** (-0.4 * extcon * a_lam_sn) / (1 + z)
-        sn_interp = np.interp(
-            lam, redshifted_sn, extinct_excon, left=np.nan, right=np.nan
-        )
+    Splitting the redshift from the extinction matters: the shift is shared
+    by every template and by every extinction value, so a caller sweeping A_v
+    at fixed z should hoist :func:`redshift_bank` out of its loop.
+    """
 
-        sn.append(sn_interp)
+    one_plus_z = 1.0 + z
+    sn = redshift_bank(sn_bank, z)
+    gal = redshift_bank(gal_bank, z)
+    reddening = 10 ** (-0.4 * extcon * Alam(np.asarray(lam) / one_plus_z))
 
-    for i in range(0, len(templates_gal_trunc)):
+    return (sn * reddening)[np.newaxis, :, :], gal[:, np.newaxis, :]
 
-        one_gal = templates_gal_trunc_dict[templates_gal_trunc[i]]
-        gal_interp = np.interp(
-            lam,
-            one_gal[:, 0] * (z + 1),
-            one_gal[:, 1] / (1 + z),
-            left=np.nan,
-            right=np.nan,
-        )
-        gal.append(gal_interp)
 
-    # Redefine sn and gal by adding a new axis
+def redshift_bank(bank, z):
+    """Every template in ``bank`` at redshift ``z``, dimmed by (1 + z)."""
 
-    sn = np.array(sn)
-    gal = np.array(gal)
-    
-    #print(sn.shape)
-    #print(gal.shape)
-
-    gal = gal[:, np.newaxis, :]
-    sn = sn[np.newaxis, :, :]
-
-    return sn, gal
+    return bank.at_redshift(z) / (1.0 + z)
 
 
 # The telluric A band, in Angstroms.
@@ -314,15 +291,13 @@ def core(
     int_obj,
     z,
     extcon,
+    sn,
+    gal,
     templates_sn_trunc,
-    templates_sn_trunc_dict,
     templates_gal_trunc,
-    templates_gal_trunc_dict,
-    alam_dict,
     lam,
-    resolution,
     iterations,
-    sigma=None,
+    sigma,
     **kwargs
 ):
 
@@ -360,23 +335,9 @@ def core(
     if name is None:
         name = os.path.basename(original) if isinstance(original, str) else "spectrum"
 
-    # sigma depends only on the observed spectrum, not on (z, A_v), so the
-    # caller computes it once for the whole grid and passes it in. Recomputing
-    # it here -- re-reading the file and re-running the Savitzky-Golay filter
-    # for every grid point -- used to be half the cost of this function.
-    if sigma is None:
-        sigma = error_obj(kind, lam, original)
-
-    sn, gal = sn_hg_arrays(
-        z,
-        extcon,
-        lam,
-        templates_sn_trunc,
-        templates_sn_trunc_dict,
-        templates_gal_trunc,
-        templates_gal_trunc_dict,
-        alam_dict,
-    )
+    # sn and gal arrive already redshifted, extincted and resampled onto the
+    # observed grid: on a log grid that is a shift shared by the whole bank,
+    # so the caller does it once per redshift rather than once per grid point.
 
     b, d, chi2, times = solve_grid(
         sn, gal, int_obj, sigma, weighted=bool(kwargs.get("weighted_solve", False))
@@ -398,11 +359,28 @@ def core(
 
     index = np.argsort(reduchi2_1d)
 
-    redchi2 = []
-    all_tables = []
-
-    # Depends only on lam and extcon, both fixed for this call.
+    # Column-wise accumulation, then ONE Table at the end. Building a
+    # single-row astropy Table per result and stacking them cost more than
+    # the chi2 it was reporting -- 11.6 ms against 9.7 ms per grid point on
+    # the shipped bank, because each Table validates and converts 13 columns.
+    # Used only for the reported SN/host flux split. Note this reapplies the
+    # reddening to a model that already carries it, and evaluates the law at
+    # the observed rather than the rest wavelength -- both pre-existing, and
+    # both affecting only the Frac(SN)/Frac(gal) diagnostic, never the fit.
     extinction_at_lam = 10 ** (-0.4 * extcon * Alam(lam))
+
+    redchi2 = []
+    spectra = []
+    galaxies = []
+    supernovae = []
+    const_sn = []
+    const_gal = []
+    phases = []
+    bands = []
+    frac_sn = []
+    frac_gal = []
+    chi2_dof = []
+    chi2_dof2 = []
 
     for i in range(iterations):
 
@@ -412,82 +390,64 @@ def core(
         redchi2.append(rchi2)
 
         supernova_file = templates_sn_trunc[idx[1]]
-        host_galaxy_file = templates_gal_trunc[idx[0]]
-
-        host_galaxy_file = str(host_galaxy_file)
-        idxx = host_galaxy_file.rfind("/")
-        host_galaxy_file = host_galaxy_file[idxx + 1 :]
+        host_galaxy_file = str(templates_gal_trunc[idx[0]])
+        host_galaxy_file = host_galaxy_file[host_galaxy_file.rfind("/") + 1 :]
 
         bb = b[idx[0]][idx[1]]
-
         dd = d[idx[0]][idx[1]]
+
         sn_flux = sn[0, idx[1], :]
         gal_flux = gal[idx[0], 0, :]
-        sn_cont = bb * np.nanmean(sn_flux * extinction_at_lam)
-        gal_cont = dd * np.nanmean(gal_flux)
-        sum_cont = sn_cont + gal_cont
-        sn_cont = sn_cont / sum_cont
-        gal_cont = gal_cont / sum_cont
+        sn_contribution = bb * np.nanmean(sn_flux * extinction_at_lam)
+        gal_contribution = dd * np.nanmean(gal_flux)
+        total = sn_contribution + gal_contribution
 
         ii = supernova_file.rfind(":")
-        the_phase = supernova_file[ii + 1 : -1]
-        the_band = supernova_file[-1]
 
-        output = table.Table(
-            np.array(
-                [
-                    os.path.basename(name),
-                    host_galaxy_file,
-                    supernova_file,
-                    bb,
-                    dd,
-                    z,
-                    extcon,
-                    the_phase,
-                    the_band,
-                    sn_cont,
-                    gal_cont,
-                    reduchi2_once[idx],
-                    reduchi2[idx],
-                ]
-            ),
-            names=(
-                "SPECTRUM",
-                "GALAXY",
-                "SN",
-                "CONST_SN",
-                "CONST_GAL",
-                "Z",
-                "A_v",
-                "Phase",
-                "Band",
-                "Frac(SN)",
-                "Frac(gal)",
-                "CHI2/dof",
-                "CHI2/dof2",
-            ),
-            dtype=(
-                "S200",
-                "S200",
-                "S200",
-                "f",
-                "f",
-                "f",
-                "f",
-                "S200",
-                "S200",
-                "f",
-                "f",
-                "f",
-                "f",
-            ),
-        )
+        spectra.append(os.path.basename(name))
+        galaxies.append(host_galaxy_file)
+        supernovae.append(supernova_file)
+        const_sn.append(bb)
+        const_gal.append(dd)
+        phases.append(supernova_file[ii + 1 : -1])
+        bands.append(supernova_file[-1])
+        frac_sn.append(sn_contribution / total)
+        frac_gal.append(gal_contribution / total)
+        chi2_dof.append(reduchi2_once[idx])
+        chi2_dof2.append(reduchi2[idx])
 
-        all_tables.append(output)
-
-    # One vstack after the loop, not one per iteration -- rebuilding the whole
-    # table on every pass made this quadratic in `iterations`.
-    outputs = table.vstack(all_tables)
+    outputs = table.Table(
+        [
+            np.array(spectra, dtype="S200"),
+            np.array(galaxies, dtype="S200"),
+            np.array(supernovae, dtype="S200"),
+            np.array(const_sn, dtype="f"),
+            np.array(const_gal, dtype="f"),
+            np.full(iterations, z, dtype="f"),
+            np.full(iterations, extcon, dtype="f"),
+            np.array(phases, dtype="S200"),
+            np.array(bands, dtype="S200"),
+            np.array(frac_sn, dtype="f"),
+            np.array(frac_gal, dtype="f"),
+            np.array(chi2_dof, dtype="f"),
+            np.array(chi2_dof2, dtype="f"),
+        ],
+        names=(
+            "SPECTRUM",
+            "GALAXY",
+            "SN",
+            "CONST_SN",
+            "CONST_GAL",
+            "Z",
+            "A_v",
+            "Phase",
+            "Band",
+            "Frac(SN)",
+            "Frac(gal)",
+            "CHI2/dof",
+            "CHI2/dof2",
+        ),
+    )
 
     return outputs, redchi2
 
@@ -534,27 +494,48 @@ def _init_worker(state):
 
 
 def _fit_one_grid_point(args):
-    """Fit the whole template bank at one (redshift, extinction) point."""
+    """Fit the bank at one redshift, across a group of extinction values.
 
-    z, extcon = args
+    The redshift shift is shared by the whole bank and does not depend on
+    A_v, so it is done once here and reused across the group. That is what
+    log binning buys: on a linear grid this step was a per-template
+    interpolation repeated for every extinction value.
+    """
+
+    z, extinctions = args
     state = _SHARED_STATE
 
-    result, _ = core(
-        state["int_obj"],
-        z,
-        extcon,
-        state["sn_names"],
-        state["sn_templates"],
-        state["gal_names"],
-        state["gal_templates"],
-        state["alam"],
-        state["lam"],
-        state["resolution"],
-        state["iterations"],
-        sigma=state["sigma"],
-        **state["kwargs"]
-    )
-    return result
+    lam = state["lam"]
+
+    # Done once for the whole extinction group: the shift is shared.
+    sn_at_z = redshift_bank(state["sn_bank"], z)[np.newaxis, :, :]
+    gal_at_z = redshift_bank(state["gal_bank"], z)[:, np.newaxis, :]
+
+    # Extinction acts at the template's rest wavelength, which for observed
+    # pixel lam is lam / (1 + z). Evaluating the law there directly is exact
+    # and avoids interpolating the extinction curve.
+    alam_rest = Alam(lam / (1.0 + z))
+
+    results = []
+    for extcon in extinctions:
+        reddening = 10 ** (-0.4 * extcon * alam_rest)
+
+        result, _ = core(
+            state["int_obj"],
+            z,
+            extcon,
+            sn_at_z * reddening,
+            gal_at_z,
+            state["sn_names"],
+            state["gal_names"],
+            lam,
+            state["iterations"],
+            state["sigma"],
+            **state["kwargs"]
+        )
+        results.append(result)
+
+    return results
 
 
 # Past this many processes the fork and queue overhead costs more than the
@@ -562,6 +543,28 @@ def _fit_one_grid_point(args):
 # Measured on a 441-point scan over the shipped bank, 16-32 workers ran in
 # ~2s while 244 took ~6s. Raise it with "n_cores" if your grid is much larger.
 DEFAULT_MAX_WORKERS = 32
+
+
+def build_tasks(redshift, extconstant, n_workers):
+    """Split the (redshift, A_v) grid into units of work.
+
+    A unit is one redshift plus a group of extinction values, because the
+    redshift shift is shared across extinction and wants to be done once.
+    Grouping too coarsely would leave workers idle when there is only one
+    redshift, so the extinction axis is split into enough pieces to keep the
+    pool busy and no more.
+    """
+
+    redshift = np.atleast_1d(redshift)
+    extconstant = np.atleast_1d(extconstant)
+
+    target_tasks = max(1, n_workers * 4)
+    groups_per_z = int(np.ceil(target_tasks / len(redshift)))
+    n_groups = max(1, min(len(extconstant), groups_per_z))
+
+    extinction_groups = np.array_split(extconstant, n_groups)
+
+    return [(float(z), group) for z in redshift for group in extinction_groups]
 
 
 def resolve_worker_count(requested, n_tasks):
@@ -649,7 +652,6 @@ def all_parameter_space(
 
     templates_sn_trunc_dict = {}
     templates_gal_trunc_dict = {}
-    alam_dict = {}
     sn_spec_files = [str(x) for x in metadata.shorhand_dict.values()]
     path_dict = {}
 
@@ -679,7 +681,6 @@ def all_parameter_space(
             path_dict[short_name] = all_bank_files[i]
 
             templates_sn_trunc_dict[short_name] = one_sn
-            alam_dict[short_name] = Alam(one_sn[:, 0])
 
     elif parameters.resolution != 30 or parameters.resolution != 10:
 
@@ -702,7 +703,6 @@ def all_parameter_space(
 
             path_dict[short_name] = all_bank_files[i]
             templates_sn_trunc_dict[short_name] = one_sn
-            alam_dict[short_name] = Alam(one_sn[:, 0])
 
     for i in range(0, len(templates_gal_trunc)):
 
@@ -718,8 +718,31 @@ def all_parameter_space(
         )
     )
 
-    # Create list of all parameter combinations
-    params = list(itertools.product(redshift, extconstant))
+    # Resample the whole bank onto a rest-frame log grid aligned with the
+    # observed one. From here a redshift is a shift, so this is the only time
+    # anything is interpolated.
+    observed_grid = kwargs["observed_grid"]
+    max_z = float(np.max(redshift))
+
+    bank_start = time.time()
+    sn_bank = RedshiftableTemplates.from_templates(
+        [templates_sn_trunc_dict[name][:, 0] for name in sn_spec_files],
+        [templates_sn_trunc_dict[name][:, 1] for name in sn_spec_files],
+        observed_grid,
+        max_z,
+    )
+    gal_bank = RedshiftableTemplates.from_templates(
+        [templates_gal_trunc_dict[name][:, 0] for name in templates_gal_trunc],
+        [templates_gal_trunc_dict[name][:, 1] for name in templates_gal_trunc],
+        observed_grid,
+        max_z,
+    )
+    print(
+        "Resampled onto a {0:.0f} km/s log grid ({1} bins) in {2: .1f}s".format(
+            observed_grid.velocity_resolution, len(observed_grid),
+            time.time() - bank_start,
+        )
+    )
 
     # The error spectrum depends only on the observed object, so derive it once
     # here rather than once per grid point inside core().
@@ -729,18 +752,18 @@ def all_parameter_space(
     _SHARED_STATE = {
         "int_obj": int_obj,
         "sn_names": sn_spec_files,
-        "sn_templates": templates_sn_trunc_dict,
         "gal_names": templates_gal_trunc,
-        "gal_templates": templates_gal_trunc_dict,
-        "alam": alam_dict,
+        "sn_bank": sn_bank,
+        "gal_bank": gal_bank,
         "lam": lam,
-        "resolution": resolution,
         "iterations": iterations,
         "sigma": sigma,
         "kwargs": kwargs,
     }
 
-    n_workers = resolve_worker_count(kwargs.get("n_cores"), len(params))
+    n_grid_points = len(redshift) * len(extconstant)
+    n_workers = resolve_worker_count(kwargs.get("n_cores"), n_grid_points)
+    params = build_tasks(redshift, extconstant, n_workers)
 
     fit_start = time.time()
 
@@ -757,12 +780,14 @@ def all_parameter_space(
             results = _run_pool(params, n_workers)
 
     print(
-        "Fitted {0} grid points on {1} worker(s) in {2: .1f}s".format(
-            len(params), n_workers, time.time() - fit_start
+        "Fitted {0} grid points ({1} redshifts x {2} A_v) as {3} task(s) on "
+        "{4} worker(s) in {5: .1f}s".format(
+            n_grid_points, len(redshift), len(extconstant), len(params),
+            n_workers, time.time() - fit_start,
         )
     )
 
-    result = table.vstack(results)
+    result = table.vstack([t for group in results for t in group])
 
     result.sort("CHI2/dof2")
 

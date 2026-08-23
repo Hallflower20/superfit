@@ -83,6 +83,11 @@ DEFAULT_CONFIG = {
     "temp_sn_tr": ALL_SN_TYPES,
     "temp_gal_tr": ALL_GALAXY_TYPES,
     "resolution": 10,
+    # The fit runs on a grid uniform in ln(lambda), so its step is a velocity
+    # rather than a wavelength. None means "match the number of bins a linear
+    # grid of `resolution` Angstroms would have had over the same span", which
+    # is about 500 km/s for the usual 10 A over the optical.
+    "velocity_resolution": None,
     "epoch_low": 0,
     "epoch_high": 0,
     # --- wavelength range; equal values mean "match the object" ----------
@@ -230,6 +235,13 @@ def validate_config(config):
     if config["resolution"] <= 0:
         raise ConfigError(
             "resolution must be positive, got {!r}".format(config["resolution"])
+        )
+
+    velocity = config["velocity_resolution"]
+    if velocity is not None and velocity <= 0:
+        raise ConfigError(
+            "velocity_resolution is in km/s and must be positive, got "
+            "{!r}".format(velocity)
         )
 
     if not 0 <= config["minimum_overlap"] <= 1:
