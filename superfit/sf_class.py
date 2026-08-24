@@ -76,11 +76,16 @@ class Superfit:
         if config is None and _looks_like_config(spectrum):
             config, spectrum = spectrum, None
 
+        # Settings first, spectrum second. Merging and validating is pure and
+        # instant; reading a spectrum is I/O. A misspelled setting should be
+        # reported as a misspelled setting, not hidden behind whatever the
+        # filesystem happens to say about a path that was also wrong.
+        merged = load_config(config, **overrides)
+
         spectrum = self._resolve_spectrum(
             spectrum, wavelength=wavelength, flux=flux, error=error, name=name
         )
 
-        merged = load_config(config, **overrides)
         if spectrum is None:
             if not merged["object_to_fit"]:
                 raise ConfigError(
@@ -186,7 +191,7 @@ class Superfit:
     def mask_galaxy_lines(self):
 
         parameters = self.parameters
-        if parameters.use_exact_z != 1:
+        if not parameters.use_exact_z:
             raise Exception(
                 "Make sure to pick an exact value for z in order to mask the host lines accordingly!"
             )
@@ -455,7 +460,7 @@ class Superfit:
 
             plt.savefig(path)
 
-            if parameters.show == 1:
+            if parameters.show:
                 plt.show()
         finally:
             plt.close(figure)

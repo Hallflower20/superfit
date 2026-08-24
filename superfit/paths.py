@@ -12,6 +12,7 @@ documentation.
 """
 
 import os
+import sys
 
 # Environment overrides, newest name first. NGSF_BANK_DIR is the name this
 # used to have and is still honoured.
@@ -57,6 +58,27 @@ def _candidate_bank_dirs():
     yield os.path.join(os.getcwd(), "bank")
     yield os.path.join(REPO_DIR, "bank")
     yield os.path.join(PACKAGE_DIR, "bank")
+    # Where `superfit bank install` puts it. Last, so a bank sitting next to
+    # the spectra you are working on still wins -- but present, so a plain
+    # `pip install superfit && superfit bank install` needs no further setup.
+    yield _user_data_bank_dir()
+
+
+def _user_data_bank_dir():
+    """The per-user data directory ``superfit bank install`` writes to.
+
+    Duplicated from superfit.bank rather than imported: this module is the
+    one every other module depends on, and it must not start importing
+    things back.
+    """
+
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "superfit", "bank")
 
 
 def find_bank_dir(use_cache=True):
@@ -82,10 +104,10 @@ def find_bank_dir(use_cache=True):
     raise FileNotFoundError(
         "Could not locate the superfit template bank. Looked in:\n  "
         + "\n  ".join(tried)
-        + "\n\nDownload it from "
+        + "\n\nInstall it with:\n\n    superfit bank install\n\n"
+        "or download it from "
         + BANK_URL
-        + "\nand unzip it into the working directory, or point "
-        "SUPERFIT_BANK_DIR at it."
+        + " and point SUPERFIT_BANK_DIR at it."
     )
 
 

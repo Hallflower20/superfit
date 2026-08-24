@@ -70,7 +70,7 @@ DEFAULT_CONFIG = {
     # None means "the spectrum was supplied directly, not as a path".
     "object_to_fit": None,
     # --- redshift --------------------------------------------------------
-    "use_exact_z": 1,
+    "use_exact_z": True,
     "z_exact": 0.0,
     "z_range_begin": 0.0,
     "z_range_end": 0.1,
@@ -103,13 +103,15 @@ DEFAULT_CONFIG = {
     "upper_lam": 0,
     # --- preprocessing ---------------------------------------------------
     "error_spectrum": "sg",
-    "mask_galaxy_lines": 1,
-    "mask_telluric": 1,
+    "mask_galaxy_lines": True,
+    "mask_telluric": True,
     "minimum_overlap": 0.7,
     # --- fitting ---------------------------------------------------------
     "iterations": 10,
     "n_cores": 0,
-    "weighted_solve": 0,
+    "weighted_solve": False,
+    # Which set of scientific defaults this run used; see PROFILES.
+    "profile": "legacy",
     # --- output ----------------------------------------------------------
     # Where run directories are created; empty means the working directory.
     # Each fit gets its own subdirectory under this, named after the spectrum.
@@ -117,10 +119,47 @@ DEFAULT_CONFIG = {
     # Replace a run directory that already holds results. Off by default:
     # losing a fit to a re-run aimed at the wrong place is not recoverable.
     "overwrite": False,
-    "show_plot": 0,
+    "show_plot": False,
     "show_plot_png": False,
     "how_many_plots": 0,
 }
+
+
+# Settings that are on/off. JSON files in the wild write these as 0 and 1;
+# anyone writing one today writes true and false. Both are accepted and
+# normalised to bool here, so no call site has to care which it was given.
+BOOLEAN_KEYS = frozenset(
+    [
+        "use_exact_z",
+        "mask_galaxy_lines",
+        "mask_telluric",
+        "weighted_solve",
+        "overwrite",
+        "show_plot",
+        "show_plot_png",
+    ]
+)
+
+_TRUE = {"1", "true", "yes", "on", "y", "t"}
+_FALSE = {"0", "false", "no", "off", "n", "f"}
+
+
+# Named sets of scientific defaults.
+#
+# `legacy` is what superfit has always done, and is the default: results
+# published from earlier versions were produced with it, and a classification
+# that changes because the package was upgraded is worse than one that is
+# slightly less statistically pure.
+#
+# `modern` solves for the template amplitudes with the same 1/sigma**2
+# weights the chi2 uses, which is the consistent thing to do. It shifts every
+# chi2 and can change which template wins, so it is opt-in.
+PROFILES = {
+    "legacy": {"weighted_solve": False},
+    "modern": {"weighted_solve": True},
+}
+
+DEFAULT_PROFILE = "legacy"
 
 
 # Shorthand accepted by Superfit(...) and mapped onto real config keys.
@@ -207,13 +246,49 @@ def resolve_aliases(overrides):
     return resolved
 
 
-def load_config(source=None, **overrides):
+def as_bool(value, key="value"):
+    """Interpret an on/off setting written as a bool, a number, or a word."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+
+    raise ConfigError(
+        "{} must be true or false (0 and 1 are also accepted), got "
+        "{!r}".format(key, value)
+    )
+
+
+def strip_comments(config):
+    """Drop keys beginning with an underscore.
+
+    JSON has no comment syntax, so a configuration meant to be read by a
+    person has nowhere to explain itself. Underscore-prefixed keys are
+    ignored here, which gives ``superfit config create`` somewhere to put
+    the explanation without inventing a new file format.
+    """
+
+    return {k: v for k, v in config.items() if not str(k).startswith("_")}
+
+
+def load_config(source=None, profile=None, **overrides):
     """Build a complete configuration.
 
     Parameters
     ----------
     source : dict, str, or None
-        A parameter dict, a JSON string, or a path to a JSON file.
+        A parameter dict, a JSON string, or a path to a JSON file. Keys
+        beginning with an underscore are treated as comments and ignored.
+    profile : str, optional
+        A named set of scientific defaults; see :data:`PROFILES`. Taken from
+        ``source`` if it names one, and otherwise :data:`DEFAULT_PROFILE`.
     **overrides
         Individual settings, taking precedence over ``source``. Shorthand
         names in :data:`ALIASES` are accepted.
@@ -221,13 +296,27 @@ def load_config(source=None, **overrides):
     Returns
     -------
     dict
-        Every key in :data:`DEFAULT_CONFIG`, with the caller's values merged
-        over the defaults.
+        Every key in :data:`DEFAULT_CONFIG`, with the profile applied over
+        the defaults and the caller's values over that.
     """
 
+    raw = strip_comments(read_config(source))
+    resolved = resolve_aliases(overrides)
+
+    name = profile or resolved.pop("profile", None) or raw.pop("profile", None)
+    name = name or DEFAULT_PROFILE
+    if name not in PROFILES:
+        raise ConfigError(
+            "Unknown profile {!r}. Available profiles: {}.".format(
+                name, ", ".join(sorted(PROFILES))
+            )
+        )
+
     config = copy.deepcopy(DEFAULT_CONFIG)
-    config.update(read_config(source))
-    config.update(resolve_aliases(overrides))
+    config.update(PROFILES[name])
+    config.update(raw)
+    config.update(resolved)
+    config["profile"] = name
 
     unknown = set(config) - set(DEFAULT_CONFIG)
     if unknown:
@@ -237,6 +326,9 @@ def load_config(source=None, **overrides):
                 ", ".join(sorted(DEFAULT_CONFIG)),
             )
         )
+
+    for key in BOOLEAN_KEYS:
+        config[key] = as_bool(config[key], key)
 
     validate_config(config)
     return config

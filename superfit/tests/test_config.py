@@ -11,6 +11,7 @@ import json
 import pytest
 
 from superfit.config import (
+    BOOLEAN_KEYS,
     DEFAULT_CONFIG,
     ConfigError,
     load_config,
@@ -95,6 +96,58 @@ class TestAliases:
 
     def test_resolve_aliases_leaves_real_keys_alone(self):
         assert resolve_aliases({"resolution": 10}) == {"resolution": 10}
+
+
+class TestBooleans:
+    """0/1 is what the parameter files in the wild say; true/false is what
+    anyone writing one today says. Both have to mean the same thing."""
+
+    @pytest.mark.parametrize("key", sorted(BOOLEAN_KEYS))
+    @pytest.mark.parametrize(
+        "given,expected",
+        [(1, True), (0, False), (True, True), (False, False),
+         ("true", True), ("false", False), ("yes", True), ("no", False)],
+    )
+    def test_both_spellings_are_accepted(self, key, given, expected):
+        settings = {key: given}
+        if key == "use_exact_z" and not expected:
+            # A scan and host-line masking are mutually exclusive; that rule
+            # is TestValidation's business, not this test's.
+            settings["mask_galaxy_lines"] = False
+
+        assert load_config(**settings)[key] is expected
+
+    def test_the_legacy_file_and_a_modern_one_agree(self, tmp_path):
+        legacy = load_config({"mask_telluric": 1, "show_plot": 0})
+        modern = load_config({"mask_telluric": True, "show_plot": False})
+
+        assert legacy == modern
+
+    def test_something_that_is_neither_is_rejected(self):
+        with pytest.raises(ConfigError, match="must be true or false"):
+            load_config(mask_telluric="maybe")
+
+    def test_the_key_is_named_in_the_error(self):
+        with pytest.raises(ConfigError, match="mask_telluric"):
+            load_config(mask_telluric=7)
+
+
+class TestComments:
+    """JSON has no comment syntax, so a parameter file cannot explain itself
+    unless something ignores the explanations."""
+
+    def test_underscore_keys_are_ignored(self):
+        config = load_config({"_resolution": "how finely to bin", "resolution": 30})
+
+        assert config["resolution"] == 30
+        assert "_resolution" not in config
+
+    def test_an_underscore_key_is_not_an_unknown_key(self):
+        load_config({"_note": "anything at all"})
+
+    def test_a_real_typo_is_still_caught(self):
+        with pytest.raises(ConfigError, match="resolutoin"):
+            load_config({"resolutoin": 30})
 
 
 class TestValidation:

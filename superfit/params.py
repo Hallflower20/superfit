@@ -76,7 +76,7 @@ class Parameters:
         self.mask_galaxy_lines = data["mask_galaxy_lines"]
         self.mask_telluric = data["mask_telluric"]
 
-        if self.mask_galaxy_lines == 1 and len(self.redshift) != 1:
+        if self.mask_galaxy_lines and len(self.redshift) != 1:
             raise Exception(
                 "Make sure to pick an exact value for z in order to mask the host lines accordingly!"
             )
