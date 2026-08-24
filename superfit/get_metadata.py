@@ -3,6 +3,7 @@ import numpy as np
 import os
 import pandas as pd
 import csv
+import threading
 from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
@@ -135,6 +136,14 @@ class Metadata(object):
 _cached_metadata = None
 _cached_key = None
 
+# Held across the check, the build and the store, so that the three cannot
+# be interleaved with another caller's. Returning the built object from a
+# local (below) already narrows the window to a single store instruction,
+# but "narrow" is not "closed", and a scan that hands back the wrong
+# template list is not the kind of bug worth leaving a window for. The lock
+# costs nothing: it is taken once per fit, around work that takes a second.
+_cache_lock = threading.Lock()
+
 
 def get_metadata(parameters):
     """Return the bank metadata for ``parameters``, scanning the bank rarely.
@@ -151,14 +160,16 @@ def get_metadata(parameters):
     global _cached_metadata, _cached_key
 
     key = parameters.metadata_key
-    if _cached_metadata is not None and _cached_key == key:
-        return _cached_metadata
 
-    # Built into a local and returned from the local. Returning the global
-    # instead handed back whatever a concurrent caller had just cached --
-    # a different set of templates, silently -- and left the cache holding
-    # one fit's metadata under another fit's key for the rest of the process.
-    metadata = Metadata(parameters)
-    _cached_metadata = metadata
-    _cached_key = key
-    return metadata
+    with _cache_lock:
+        if _cached_metadata is not None and _cached_key == key:
+            return _cached_metadata
+
+        # Built into a local and returned from the local. Returning the
+        # global instead could hand back whatever another caller had stored
+        # in between, and leave the cache holding one fit's metadata under
+        # another fit's key for the rest of the process.
+        metadata = Metadata(parameters)
+        _cached_metadata = metadata
+        _cached_key = key
+        return metadata

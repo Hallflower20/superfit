@@ -208,6 +208,37 @@ class TestInstanceIsolation:
         for z, result in zip(redshifts, results):
             assert result["Z"].to_numpy() == pytest.approx(z)
 
+    def test_alternating_configs_each_get_their_own_bank_metadata(self, monkeypatch):
+        """The scan is cached across fits, so it has to be cached per config.
+
+        This pins the caching contract -- ask for A, then B, then A again,
+        and get A's templates back, not whichever was scanned last. It does
+        *not* reproduce the interleaving that motivated the lock in
+        get_metadata: that window is a single store instruction wide and
+        cannot be forced deterministically from Python. The lock closes it;
+        this test covers everything around it.
+        """
+
+        from superfit import get_metadata as gm
+        from superfit.config import load_config
+        from superfit.params import Parameters
+
+        monkeypatch.setattr(gm, "_cached_metadata", None)
+        monkeypatch.setattr(gm, "_cached_key", None)
+
+        grid = dict(lower_lam=3000, upper_lam=10000)
+        narrow = Parameters(load_config(epoch_low=-10, epoch_high=10, **grid))
+        everything = Parameters(load_config(epoch_low=0, epoch_high=0, **grid))
+
+        n_narrow = len(gm.get_metadata(narrow).shorhand_dict)
+        n_everything = len(gm.get_metadata(everything).shorhand_dict)
+
+        assert 0 < n_narrow < n_everything, "an epoch cut must actually cut"
+
+        # Back to the first: its own scan, not the one just cached.
+        assert len(gm.get_metadata(narrow).shorhand_dict) == n_narrow
+        assert len(gm.get_metadata(everything).shorhand_dict) == n_everything
+
     def test_parameters_cannot_be_mutated_after_construction(self, tmp_path):
         fit = Superfit(
             TEST_SPECTRUM, output_dir=str(tmp_path) + "/", z=0.1, **BASE_KWARGS
