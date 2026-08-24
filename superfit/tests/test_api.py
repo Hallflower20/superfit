@@ -149,9 +149,10 @@ class TestInstanceIsolation:
     def test_each_fit_keeps_its_own_output_location(self, tmp_path):
         a, b = outdir(tmp_path, "a"), outdir(tmp_path, "b")
         first = Superfit(TEST_SPECTRUM, output_dir=a, z=0.1, **BASE_KWARGS)
-        Superfit(TEST_SPECTRUM, output_dir=b, z=0.2, **BASE_KWARGS)
+        second = Superfit(TEST_SPECTRUM, output_dir=b, z=0.2, **BASE_KWARGS)
 
-        assert first.parameters.save_results_path == a
+        assert first.output.path.parent == tmp_path / "a"
+        assert second.output.path.parent == tmp_path / "b"
 
     def test_parameters_cannot_be_mutated_after_construction(self, tmp_path):
         fit = Superfit(
@@ -200,20 +201,77 @@ class TestConfigForms:
         assert len(results) > 0
 
     def test_used_config_is_written_and_complete(self, tmp_path):
-        out = str(tmp_path) + "/"
-        Superfit(TEST_SPECTRUM, output_dir=out, **FIT_KWARGS).run()
+        result = Superfit(TEST_SPECTRUM, output_dir=str(tmp_path), **FIT_KWARGS).run()
 
         from superfit.config import DEFAULT_CONFIG
+        from superfit.output import USED_CONFIG_JSON
 
-        written = [f for f in os.listdir(out) if f.endswith("_used.json")]
-        assert written, "no *_used.json written"
-
-        with open(os.path.join(out, written[0])) as handle:
-            recorded = json.load(handle)
+        recorded = json.loads((result.directory / USED_CONFIG_JSON).read_text())
 
         # A three-keyword call must still record every effective setting.
         assert set(recorded) == set(DEFAULT_CONFIG)
         assert recorded["z_exact"] == 0.127
+
+
+class TestOutput:
+    """What a real fit leaves on disk, and what it hands back."""
+
+    def test_the_run_directory_holds_everything_the_fit_made(self, tmp_path):
+        result = Superfit(
+            TEST_SPECTRUM, output_dir=str(tmp_path), z=0.127, resolution=10,
+            n_plots=2, show_plot=0,
+        ).run()
+
+        from superfit.output import BINNED_TXT, RESULTS_CSV, USED_CONFIG_JSON
+
+        assert result.directory.parent == tmp_path
+        assert {p.name for p in result.artifacts} == {
+            RESULTS_CSV, USED_CONFIG_JSON, BINNED_TXT, "bestfit_1.pdf", "bestfit_2.pdf",
+        }
+        for path in result.artifacts:
+            assert path.is_file(), path
+
+    def test_refitting_the_same_spectrum_will_not_clobber_the_first_answer(
+        self, tmp_path
+    ):
+        from superfit.output import OutputExistsError
+
+        first = Superfit(TEST_SPECTRUM, output_dir=str(tmp_path), **FIT_KWARGS).run()
+        kept = first.artifact("results.csv").read_bytes()
+
+        with pytest.raises(OutputExistsError, match="already holds a fit"):
+            Superfit(TEST_SPECTRUM, output_dir=str(tmp_path), **FIT_KWARGS)
+
+        assert first.artifact("results.csv").read_bytes() == kept
+
+    def test_overwrite_is_how_you_ask_for_it(self, tmp_path):
+        Superfit(TEST_SPECTRUM, output_dir=str(tmp_path), **FIT_KWARGS).run()
+
+        again = Superfit(
+            TEST_SPECTRUM, output_dir=str(tmp_path), overwrite=True, **FIT_KWARGS
+        ).run()
+
+        assert len(again) > 0
+
+    def test_plotting_does_not_leak_figures(self, tmp_path):
+        """A batch of fits used to hold on to every figure it had drawn."""
+
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+        result = Superfit(
+            TEST_SPECTRUM, output_dir=str(tmp_path), z=0.127, resolution=10,
+            n_plots=3, show_plot=0,
+        ).run()
+
+        assert len(result.plots) == 3
+        assert plt.get_fignums() == []
+
+    def test_a_missing_output_directory_is_created(self, tmp_path):
+        deep = tmp_path / "results" / "2026" / "august"
+        result = Superfit(TEST_SPECTRUM, output_dir=str(deep), **FIT_KWARGS).run()
+
+        assert result.directory.parent == deep
 
 
 class TestErrors:
@@ -259,8 +317,11 @@ def test_run_returns_the_results_and_sets_the_attribute(tmp_path):
     fit = Superfit(TEST_SPECTRUM, output_dir=str(tmp_path) + "/", **FIT_KWARGS)
     returned = fit.run()
 
-    assert returned is fit.results
+    assert returned.results is fit.results
+    # The result object stands in for the frame it wraps.
     assert list(returned.columns)[:3] == ["SPECTRUM", "GALAXY", "SN"]
+    assert len(returned) == len(fit.results)
+    assert returned["Z"].iloc[0] == 0.127
 
 
 def test_superfit_method_is_an_alias_for_run(tmp_path):

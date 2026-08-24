@@ -13,6 +13,7 @@ from superfit.config import ConfigError, load_config
 from superfit.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
 from superfit.error_routines import linear_error, savitzky_golay
 from superfit.get_metadata import get_metadata
+from superfit.output import FitResult, RunDirectory
 from superfit.params import Parameters
 from superfit.paths import gal_dir, sne_dir
 from superfit.spectrum import Spectrum
@@ -106,10 +107,14 @@ class Superfit:
         self.flux = spectrum.flux
         self.spectrum = spectrum.as_array()
 
-        prefix = parameters.save_results_path
-        self.binned_name = prefix + self.name_no_extension + "_binned.txt"
-        self.results_name = prefix + self.name_no_extension
-        self.results_path = self.results_name + ".csv"
+        # Created now rather than at save time: a directory that cannot be
+        # written, or that already holds a fit of this spectrum, is worth
+        # hearing about before the fit runs, not thirty seconds after.
+        self.output = RunDirectory(
+            parameters.save_results_path, self.name, overwrite=parameters.overwrite
+        )
+        self.results_path = self.output.results_csv
+        self._artifacts = []
 
         # What the chi2 is measured against: masked, normalised, resampled.
         masked = spectrum
@@ -151,15 +156,15 @@ class Superfit:
     def _write_used_config(self):
         """Record the effective configuration next to the results."""
 
-        used_json = self.parameters.save_results_path + "{}_used.json".format(
-            self.name_no_extension
-        )
+        used_json = self.output.used_config_json
         try:
             with open(used_json, "w") as handle:
                 json.dump(self.parameters.config, handle, indent=2, default=str)
         except OSError as exc:
             # Not being able to write the audit file should not lose the fit.
             print("WARNING: could not write {}: {}".format(used_json, exc))
+        else:
+            self._artifacts.append(used_json)
 
     def plot(self):
 
@@ -276,8 +281,11 @@ class Superfit:
 
         Returns
         -------
-        pandas.DataFrame
-            One row per surviving template, best match first.
+        FitResult
+            The ranked table -- one row per surviving template, best match
+            first -- together with the directory the run was written to and
+            every file in it. It indexes and iterates like the DataFrame it
+            wraps, which is also available as ``.results``.
         """
 
         parameters = self.parameters
@@ -303,7 +311,7 @@ class Superfit:
             kind=parameters.kind,
             original=self.binned,
             spectrum_name=self.name,
-            save=self.results_name,
+            results_path=self.results_path,
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
             n_cores=parameters.n_cores,
@@ -314,20 +322,27 @@ class Superfit:
         )
 
         self.results = pd.read_csv(self.results_path)
+        self._artifacts.append(self.results_path)
+
         self._plot_best_fits()
-        return self.results
+
+        self.result = FitResult(self.results, self.output, self._artifacts)
+        return self.result
 
     def _write_binned(self):
         """Save the binned observation as two columns of text."""
 
+        binned_txt = self.output.binned_txt
         try:
             np.savetxt(
-                self.binned_name,
+                binned_txt,
                 np.column_stack([self.binned.wavelength, self.binned.flux]),
                 fmt="%s",
             )
         except OSError as exc:
-            print("WARNING: could not write {}: {}".format(self.binned_name, exc))
+            print("WARNING: could not write {}: {}".format(binned_txt, exc))
+        else:
+            self._artifacts.append(binned_txt)
 
     def superfit(self):
         """Backwards-compatible alias for :meth:`run`."""
@@ -335,85 +350,90 @@ class Superfit:
         return self.run()
 
     def _plot_best_fits(self):
+        """Plot the top ``how_many_plots`` matches into the run directory."""
+
+        for j in range(min(self.parameters.n, len(self.results))):
+            self._artifacts.append(self.plot_rank(j))
+
+    # NOTE: there is no results() method. `run()` assigns self.results, which
+    # would shadow any method of that name anyway; the old one was
+    # unreachable and returned itself.
+
+    def plot_rank(self, j):
+        """Plot the ``j``-th ranked match against the observation.
+
+        ``j`` counts from 0, as the results table does; the file is named
+        for the rank, counting from 1. Returns the path it wrote.
+        """
 
         parameters = self.parameters
-        result_number = 0
+        row = self.results.iloc[j]
 
-        if parameters.n > len(self.results):
+        short_name = row["SN"]
+        bb = row["CONST_SN"]
+        dd = row["CONST_GAL"]
+        z = row["Z"]
+        extmag = row["A_v"]
+        sn_cont = row["Frac(SN)"]
 
-            result_number = result_number + len(self.results)
-
-        elif len(self.results) >= parameters.n:
-
-            result_number = result_number + parameters.n
-
-        for j in range(result_number):
-
-            row = self.results.iloc[j]
-
-            hg_name = row["GALAXY"]
-            short_name = row["SN"]
-            bb = row["CONST_SN"]
-            dd = row["CONST_GAL"]
-            z = row["Z"]
-            extmag = row["A_v"]
-            sn_cont = row["Frac(SN)"]
-
-            # Get all names from the dictionary
-            full_names = [str(x) for x in self.metadata.shorhand_dict.keys()]
-            short_names = [str(x) for x in self.metadata.shorhand_dict.values()]
-
-            # print(full_names)
-
-            for i in range(0, len(short_names)):
-                if str(short_names[i]) == str(short_name):
-                    sn_best_fullname = full_names[i]
-                    sn_short_name = short_names[i]
-                    idx = sn_short_name.rfind("/")
-                    subtype = sn_short_name[:idx]
-
-            int_obj = self.int_obj
-
-            sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
-            hg_name = os.path.join(gal_dir(10), hg_name)
-
-            # print(sn_name)
-
-            nova = kill_header(sn_name)
-            nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
-
-            host = np.loadtxt(hg_name)
-            host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
-
-            # Interpolate supernova and host galaxy. This reconstructs the
-            # model the fitter scored, so the reddening has to match it: the
-            # law is evaluated at nova[:, 0], the template's REST wavelength,
-            # exactly as the fit evaluates it at lam / (1 + z).
-            redshifted_nova = nova[:, 0] * (z + 1)
-            extinct_nova = (
-                nova[:, 1]
-                * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
-                / (z + 1)
+        # The results table carries the shorthand name; the file it came from
+        # is the key of the same entry. Inverting the dict once beats the
+        # linear scan this used to do per plot, and gives a real error rather
+        # than a NameError when a name is missing.
+        by_shorthand = {
+            str(v): str(k) for k, v in self.metadata.shorhand_dict.items()
+        }
+        if str(short_name) not in by_shorthand:
+            raise KeyError(
+                "No template file for {!r} in the bank metadata; the results "
+                "were produced against a different bank.".format(short_name)
             )
+        sn_best_fullname = by_shorthand[str(short_name)]
+        subtype = str(short_name)[: str(short_name).rfind("/")]
 
-            reshifted_host = host[:, 0] * (z + 1)
-            reshifted_hostf = host[:, 1] / (z + 1)
+        sn_path = os.path.join(sne_dir(10), subtype, sn_best_fullname)
+        hg_path = os.path.join(gal_dir(10), row["GALAXY"])
 
-            nova_int = interpolate.interp1d(
-                redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
+        nova = kill_header(sn_path)
+        nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
+
+        host = np.loadtxt(hg_path)
+        host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
+
+        # Reconstruct the model the fitter scored, so the reddening has to
+        # match it: the law is evaluated at nova[:, 0], the template's REST
+        # wavelength, exactly as the fit evaluates it at lam / (1 + z).
+        redshifted_nova = nova[:, 0] * (z + 1)
+        extinct_nova = (
+            nova[:, 1]
+            * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
+            / (z + 1)
+        )
+
+        nova_int = interpolate.interp1d(
+            redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
+        )
+        host_int = interpolate.interp1d(
+            host[:, 0] * (z + 1), host[:, 1] / (z + 1),
+            bounds_error=False, fill_value="nan",
+        )
+        host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
+
+        sn_type = short_name[: short_name.find("/")]
+        subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
+        phase = str(short_name[short_name.rfind(":") + 1 : -1])
+
+        path = self.output.plot(j + 1, png=parameters.show_plot_png)
+
+        # Held explicitly rather than left on pyplot's global stack: a batch
+        # of a few hundred fits used to accumulate every figure it had ever
+        # drawn, because nothing ever closed them.
+        figure = plt.figure(figsize=(8 * np.sqrt(2), 8))
+        try:
+            plt.plot(
+                parameters.lam, self.int_obj, "r",
+                label="Input object: " + self.name,
             )
-            host_int = interpolate.interp1d(
-                reshifted_host, reshifted_hostf, bounds_error=False, fill_value="nan"
-            )
-            host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
-
-            sn_type = short_name[: short_name.find("/")]
-            hg_name = hg_name[hg_name.rfind("/") + 1 :]
-            subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
-            phase = str(short_name[short_name.rfind(":") + 1 : -1])
-
-            plt.figure(figsize=(8 * np.sqrt(2), 8))
-            plt.plot(parameters.lam, int_obj, "r", label="Input object: " + self.name)
             plt.plot(
                 parameters.lam,
                 host_nova,
@@ -425,7 +445,7 @@ class Superfit:
                 + " - Phase: "
                 + phase
                 + "\nHost: "
-                + str(hg_name)
+                + str(os.path.basename(hg_path))
                 + "\nSN contrib: {0: .1f}%".format(100 * sn_cont),
             )
             plt.legend(framealpha=1, frameon=True, fontsize=12)
@@ -433,106 +453,19 @@ class Superfit:
             plt.xlabel("Lamda", fontsize=14)
             plt.title("Best fit for z = " + str(z), fontsize=15, fontweight="bold")
 
-            if parameters.show_plot_png:
-                plt.savefig(self.results_name + "_" + str(j) + ".png")
-            else:
-                plt.savefig(self.results_name + "_" + str(j) + ".pdf")
+            plt.savefig(path)
 
             if parameters.show == 1:
                 plt.show()
+        finally:
+            plt.close(figure)
 
-    # NOTE: there is no results() method. `run()` assigns self.results, which
-    # would shadow any method of that name anyway; the old one was
-    # unreachable and returned itself.
+        return path
 
     def any_result(self, j):
+        """Backwards-compatible alias for :meth:`plot_rank`."""
 
-        parameters = self.parameters
-        row = self.results.iloc[j]
-
-        hg_name = row["GALAXY"]
-        short_name = row["SN"]
-        bb = row["CONST_SN"]
-        dd = row["CONST_GAL"]
-        z = row["Z"]
-        extmag = row["A_v"]
-        sn_cont = row["Frac(SN)"]
-
-        # Get all names from the dictionary
-        full_names = [str(x) for x in self.metadata.shorhand_dict.keys()]
-        short_names = [str(x) for x in self.metadata.shorhand_dict.values()]
-
-        for i in range(0, len(short_names)):
-            if str(short_names[i]) == str(short_name):
-                sn_best_fullname = full_names[i]
-                sn_short_name = short_names[i]
-                idx = sn_short_name.rfind("/")
-                subtype = sn_short_name[:idx]
-
-        int_obj = self.int_obj
-
-        sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
-        hg_name = os.path.join(gal_dir(10), hg_name)
-
-        nova = kill_header(sn_name)
-        nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
-
-        host = np.loadtxt(hg_name)
-        host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
-
-        # Interpolate supernova and host galaxy. As in _plot_best_fits, the
-        # law is evaluated at the template's rest wavelength so that this
-        # matches the model the fitter scored.
-        redshifted_nova = nova[:, 0] * (z + 1)
-        extinct_nova = (
-            nova[:, 1]
-            * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
-            / (z + 1)
-        )
-
-        reshifted_host = host[:, 0] * (z + 1)
-        reshifted_hostf = host[:, 1] / (z + 1)
-
-        nova_int = interpolate.interp1d(
-            redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
-        )
-        host_int = interpolate.interp1d(
-            reshifted_host, reshifted_hostf, bounds_error=False, fill_value="nan"
-        )
-        host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
-
-        sn_type = short_name[: short_name.find("/")]
-        hg_name = hg_name[hg_name.rfind("/") + 1 :]
-        subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
-        phase = str(short_name[short_name.rfind(":") + 1 : -1])
-        plt.figure(figsize=(8 * np.sqrt(2), 8))
-        plt.plot(parameters.lam, int_obj, "r", label="Input object: " + self.name)
-        plt.plot(
-            parameters.lam,
-            host_nova,
-            "g",
-            label="SN: "
-            + sn_type
-            + " - "
-            + subclass
-            + " - Phase: "
-            + phase
-            + "\nHost: "
-            + str(hg_name)
-            + "\nSN contrib: {0: .1f}%".format(100 * sn_cont),
-        )
-        plt.legend(framealpha=1, frameon=True, fontsize=12)
-        plt.ylabel("Flux arbitrary", fontsize=14)
-        plt.xlabel("Lamda", fontsize=14)
-        plt.title("Best fit for z = " + str(z), fontsize=15, fontweight="bold")
-
-        if parameters.show_plot_png:
-            plt.savefig(self.results_name + "_" + str(j) + ".png")
-        else:
-            plt.savefig(self.results_name + "_" + str(j) + ".pdf")
-
-        if parameters.show == 1:
-            plt.show()
+        return self.plot_rank(j)
 
     def convolution(self):
 

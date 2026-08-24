@@ -662,7 +662,9 @@ def all_parameter_space(
     #print(len(templates_sn_trunc))
     start = time.time()
 
-    save = kwargs["save"]
+    # The full path to write, not a prefix to concatenate onto: see
+    # superfit.output for why that distinction earned its own module.
+    results_path = os.fspath(kwargs["results_path"])
 
     templates_sn_trunc_dict = {}
     templates_gal_trunc_dict = {}
@@ -805,7 +807,7 @@ def all_parameter_space(
 
     result.sort("CHI2/dof2")
 
-    ascii.write(result, save + ".csv", format="csv", fast_writer=False, overwrite=True)
+    ascii.write(result, results_path, format="csv", fast_writer=False, overwrite=True)
 
     for message in grid_edge_warnings(result, redshift, extconstant):
         print("WARNING: " + message)

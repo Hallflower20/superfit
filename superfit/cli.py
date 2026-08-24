@@ -66,9 +66,7 @@ def apply_overrides(config, args):
     if args.object_to_fit is not None:
         config["object_to_fit"] = args.object_to_fit
     if args.saving_results_path is not None:
-        path = args.saving_results_path
-        # Downstream code concatenates this prefix onto file names.
-        config["saving_results_path"] = path if path.endswith("/") else path + "/"
+        config["saving_results_path"] = args.saving_results_path
     if args.resolution is not None:
         config["resolution"] = args.resolution
     if args.n_cores is not None:

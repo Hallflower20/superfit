@@ -59,6 +59,7 @@ class Parameters:
 
         self.object_to_fit = data["object_to_fit"]
         self.save_results_path = data["saving_results_path"]
+        self.overwrite = data["overwrite"]
 
         self.use_exact_z = data["use_exact_z"]
         self.z_exact = data["z_exact"]

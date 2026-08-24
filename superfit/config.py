@@ -111,7 +111,12 @@ DEFAULT_CONFIG = {
     "n_cores": 0,
     "weighted_solve": 0,
     # --- output ----------------------------------------------------------
+    # Where run directories are created; empty means the working directory.
+    # Each fit gets its own subdirectory under this, named after the spectrum.
     "saving_results_path": "",
+    # Replace a run directory that already holds results. Off by default:
+    # losing a fit to a re-run aimed at the wrong place is not recoverable.
+    "overwrite": False,
     "show_plot": 0,
     "show_plot_png": False,
     "how_many_plots": 0,

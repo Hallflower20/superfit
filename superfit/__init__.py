@@ -27,6 +27,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_CONFIG",
+    "FitResult",
+    "OutputExistsError",
     "Spectrum",
     "Superfit",
     "__version__",
@@ -41,6 +43,8 @@ __all__ = [
 _LAZY = {
     "Superfit": ("superfit.sf_class", "Superfit"),
     "Spectrum": ("superfit.spectrum", "Spectrum"),
+    "FitResult": ("superfit.output", "FitResult"),
+    "OutputExistsError": ("superfit.output", "OutputExistsError"),
     "DEFAULT_CONFIG": ("superfit.config", "DEFAULT_CONFIG"),
     "load_config": ("superfit.config", "load_config"),
     "set_bank_dir": ("superfit.paths", "set_bank_dir"),
