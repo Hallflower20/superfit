@@ -240,9 +240,20 @@ class Parameters:
         Used to cache the scan across fits: it walks every object directory
         and parses ~190 CSVs, and two fits that differ only in redshift want
         the same answer.
+
+        The bank directory is part of the key as well as the settings --
+        the scan reads the bank, so pointing at a different one has to
+        invalidate it.
         """
 
-        return (tuple(self.temp_sn_tr), self.epoch_low, self.epoch_high)
+        from superfit.paths import find_bank_dir
+
+        return (
+            find_bank_dir(),
+            tuple(self.temp_sn_tr),
+            self.epoch_low,
+            self.epoch_high,
+        )
 
     def _observed_wavelength(self, spectrum):
         """The observed wavelength axis, from the Spectrum or from the file."""

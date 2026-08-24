@@ -104,7 +104,9 @@ class RunDirectory:
         the new one and indistinguishable from it.
         """
 
-        for entry in self.path.iterdir():
+        # Listed before deleting: what a directory scan returns while it is
+        # being modified is not defined.
+        for entry in list(self.path.iterdir()):
             if entry.is_file() and (
                 entry.name in _OUR_FILES or _OUR_PLOTS.match(entry.name)
             ):
