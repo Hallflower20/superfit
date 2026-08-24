@@ -180,6 +180,34 @@ class TestInstanceIsolation:
         assert first.output.path.parent == tmp_path / "a"
         assert second.output.path.parent == tmp_path / "b"
 
+    def test_two_threads_fitting_at_once_both_get_their_own_answer(self, tmp_path):
+        """The bank reaches forked workers through a module-level global, so
+        two fits running at once used to publish over each other. Serial
+        workers here (n_cores=1) keep this quick; the failure it guards is
+        the silent one, where a fit returns someone else's redshift."""
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        redshifts = [0.10, 0.13, 0.16]
+        fits = [
+            Superfit(
+                TEST_SPECTRUM,
+                output_dir=outdir(tmp_path, "z{}".format(z)),
+                z=z,
+                resolution=10,
+                n_plots=0,
+                show_plot=0,
+                n_cores=1,
+            )
+            for z in redshifts
+        ]
+
+        with ThreadPoolExecutor(len(fits)) as pool:
+            results = list(pool.map(lambda fit: fit.run(), fits))
+
+        for z, result in zip(redshifts, results):
+            assert result["Z"].to_numpy() == pytest.approx(z)
+
     def test_parameters_cannot_be_mutated_after_construction(self, tmp_path):
         fit = Superfit(
             TEST_SPECTRUM, output_dir=str(tmp_path) + "/", z=0.1, **BASE_KWARGS

@@ -57,8 +57,11 @@ class Superfit:
     :data:`superfit.config.DEFAULT_CONFIG`.
 
     Each instance owns its settings, as ``self.parameters``. Building a
-    second Superfit does not disturb the first, so several fits can be set up
-    and run in any order, or concurrently.
+    second Superfit does not disturb the first, so several fits can be set
+    up and then run in any order. Two threads may call ``run()`` at once and
+    both get the right answer, but they take turns over the fit itself --
+    which is already spread across every core, so there is nothing to gain
+    by it. To fit many spectra at once, use separate processes.
     """
 
     def __init__(

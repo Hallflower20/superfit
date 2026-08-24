@@ -9,6 +9,7 @@ import itertools
 import os
 from PyAstronomy import pyasl
 import multiprocessing as mp
+import threading
 from tqdm import tqdm
 
 from superfit.get_metadata import get_metadata
@@ -493,6 +494,9 @@ def _single_threaded_blas():
 # before the pool is created; under fork the children inherit it for free.
 _SHARED_STATE = None
 
+# Held for as long as _SHARED_STATE is published; see all_parameter_space.
+_FIT_LOCK = threading.Lock()
+
 
 def _init_worker(state):
     """Fallback for start methods that do not inherit memory (spawn)."""
@@ -759,37 +763,48 @@ def all_parameter_space(
     # here rather than once per grid point inside core().
     sigma = error_obj(kwargs["kind"], lam, kwargs["original"])
 
-    global _SHARED_STATE
-    _SHARED_STATE = {
-        "int_obj": int_obj,
-        "sn_names": sn_spec_files,
-        "gal_names": templates_gal_trunc,
-        "sn_bank": sn_bank,
-        "gal_bank": gal_bank,
-        "lam": lam,
-        "iterations": iterations,
-        "sigma": sigma,
-        "R_v": kwargs.get("R_v", 3.1),
-        "kwargs": kwargs,
-    }
-
     n_grid_points = len(redshift) * len(extconstant)
     n_workers = resolve_worker_count(kwargs.get("n_cores"), n_grid_points)
     params = build_tasks(redshift, extconstant, n_workers)
 
     fit_start = time.time()
 
-    if n_workers == 1:
-        # One grid point, or an explicit request for serial: skip the pool
-        # entirely rather than paying to fork for a single task.
-        results = [_fit_one_grid_point(p) for p in tqdm(params)]
-    else:
-        # Each worker's chi2 is a handful of small BLAS calls. Left to
-        # themselves they would each spin up a full thread pool, so N workers
-        # times N BLAS threads fight over the same cores. Forked children
-        # inherit this limit.
-        with _single_threaded_blas():
-            results = _run_pool(params, n_workers)
+    # _SHARED_STATE is how the bank reaches forked workers without being
+    # pickled per task, which means it is one variable for the whole process.
+    # Two threads calling this at once would publish over each other -- and
+    # forking a pool from several threads at once deadlocks besides -- so
+    # concurrent fits take turns here rather than corrupting each other. The
+    # work inside is already spread across every core, so nothing is lost.
+    global _SHARED_STATE
+
+    with _FIT_LOCK:
+        _SHARED_STATE = {
+            "int_obj": int_obj,
+            "sn_names": sn_spec_files,
+            "gal_names": templates_gal_trunc,
+            "sn_bank": sn_bank,
+            "gal_bank": gal_bank,
+            "lam": lam,
+            "iterations": iterations,
+            "sigma": sigma,
+            "R_v": kwargs.get("R_v", 3.1),
+            "kwargs": kwargs,
+        }
+
+        try:
+            if n_workers == 1:
+                # One grid point, or an explicit request for serial: skip the
+                # pool entirely rather than paying to fork for a single task.
+                results = [_fit_one_grid_point(p) for p in tqdm(params)]
+            else:
+                # Each worker's chi2 is a handful of small BLAS calls. Left to
+                # themselves they would each spin up a full thread pool, so N
+                # workers times N BLAS threads fight over the same cores.
+                # Forked children inherit this limit.
+                with _single_threaded_blas():
+                    results = _run_pool(params, n_workers)
+        finally:
+            _SHARED_STATE = None
 
     print(
         "Fitted {0} grid points ({1} redshifts x {2} A_v) as {3} task(s) on "
