@@ -13,7 +13,7 @@ from superfit.config import ConfigError, load_config
 from superfit.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
 from superfit.error_routines import linear_error, savitzky_golay
 from superfit.get_metadata import get_metadata
-from superfit.params import parameters, get_parameters, set_config
+from superfit.params import Parameters
 from superfit.paths import gal_dir, sne_dir
 from superfit.spectrum import Spectrum
 
@@ -54,6 +54,10 @@ class Superfit:
 
     Anything not specified takes its value from
     :data:`superfit.config.DEFAULT_CONFIG`.
+
+    Each instance owns its settings, as ``self.parameters``. Building a
+    second Superfit does not disturb the first, so several fits can be set up
+    and run in any order, or concurrently.
     """
 
     def __init__(
@@ -88,7 +92,9 @@ class Superfit:
             # Recorded in *_used.json so the run stays self-describing.
             merged["object_to_fit"] = spectrum.name
 
-        set_config(merged, spectrum=spectrum)
+        # This fit's own settings. Nothing about them is global, so a second
+        # Superfit built after this one cannot change what this one does.
+        self.parameters = parameters = Parameters(merged, spectrum=spectrum)
 
         self.observation = spectrum.check_long_enough(parameters.resolution)
 
@@ -118,7 +124,7 @@ class Superfit:
         # The error spectrum is measured on the binned, *unmasked* observation.
         self.binned = spectrum.binned(parameters.resolution)
 
-        self.metadata = get_metadata()
+        self.metadata = get_metadata(parameters)
 
         self._write_used_config()
 
@@ -145,12 +151,12 @@ class Superfit:
     def _write_used_config(self):
         """Record the effective configuration next to the results."""
 
-        used_json = parameters.save_results_path + "{}_used.json".format(
+        used_json = self.parameters.save_results_path + "{}_used.json".format(
             self.name_no_extension
         )
         try:
             with open(used_json, "w") as handle:
-                json.dump(parameters.config, handle, indent=2, default=str)
+                json.dump(self.parameters.config, handle, indent=2, default=str)
         except OSError as exc:
             # Not being able to write the audit file should not lose the fit.
             print("WARNING: could not write {}: {}".format(used_json, exc))
@@ -174,6 +180,7 @@ class Superfit:
 
     def mask_galaxy_lines(self):
 
+        parameters = self.parameters
         if parameters.use_exact_z != 1:
             raise Exception(
                 "Make sure to pick an exact value for z in order to mask the host lines accordingly!"
@@ -245,7 +252,7 @@ class Superfit:
 
     def mask_gal_lines_and_telluric(self):
 
-        Data_masked = mask_gal_lines(self.name, z_obj=parameters.redshift)
+        Data_masked = mask_gal_lines(self.name, z_obj=self.parameters.redshift)
         masked_spectrum = remove_telluric(Data_masked)
 
         plt.figure(figsize=(7 * np.sqrt(2), 7))
@@ -272,6 +279,8 @@ class Superfit:
         pandas.DataFrame
             One row per surviving template, best match first.
         """
+
+        parameters = self.parameters
 
         print(
             "Running optimization for spectrum: {0} with resolution = {1} Å".format(
@@ -301,6 +310,7 @@ class Superfit:
             observed_grid=parameters.observed_grid,
             weighted_solve=parameters.weighted_solve,
             R_v=parameters.R_v,
+            parameters=parameters,
         )
 
         self.results = pd.read_csv(self.results_path)
@@ -326,6 +336,7 @@ class Superfit:
 
     def _plot_best_fits(self):
 
+        parameters = self.parameters
         result_number = 0
 
         if parameters.n > len(self.results):
@@ -436,6 +447,7 @@ class Superfit:
 
     def any_result(self, j):
 
+        parameters = self.parameters
         row = self.results.iloc[j]
 
         hg_name = row["GALAXY"]

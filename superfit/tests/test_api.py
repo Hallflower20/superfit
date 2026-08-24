@@ -31,7 +31,18 @@ SCIENCE_COLUMNS = [
     "CHI2/dof2",
 ]
 
-FIT_KWARGS = dict(z=0.127, resolution=10, n_plots=0, show_plot=0)
+# Settings shared by every fit here, minus the redshift.
+BASE_KWARGS = dict(resolution=10, n_plots=0, show_plot=0)
+
+FIT_KWARGS = dict(z=0.127, **BASE_KWARGS)
+
+
+def outdir(tmp_path, name):
+    """An existing, empty directory to write one fit's results into."""
+
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path) + "/"
 
 
 def assert_same_science(a, b):
@@ -108,6 +119,46 @@ class TestInputForms:
 
         assert set(best) == {0.12, 0.127}
         assert all(np.isfinite(v) for v in best.values())
+
+
+class TestInstanceIsolation:
+    """Two fits in one process must not be able to retune each other.
+
+    Settings used to be installed into a module-level global by the
+    constructor and read back by ``run()``, so the fit that ran was
+    configured by whichever Superfit was built *last*. Silently fitting at
+    someone else's redshift is about the worst failure mode this package
+    could have, and it also ruled out any concurrency.
+    """
+
+    def test_building_a_second_fit_does_not_disturb_the_first(self, tmp_path):
+        first = Superfit(
+            TEST_SPECTRUM, output_dir=outdir(tmp_path, "a"), z=0.10, **BASE_KWARGS
+        )
+        second = Superfit(
+            TEST_SPECTRUM, output_dir=outdir(tmp_path, "b"), z=0.20, **BASE_KWARGS
+        )
+
+        assert first.parameters.redshift == pytest.approx([0.10])
+        assert second.parameters.redshift == pytest.approx([0.20])
+
+        # The bug: `first.run()` after `second` was constructed fitted at 0.20.
+        results = first.run()
+        assert results["Z"].to_numpy() == pytest.approx(0.10)
+
+    def test_each_fit_keeps_its_own_output_location(self, tmp_path):
+        a, b = outdir(tmp_path, "a"), outdir(tmp_path, "b")
+        first = Superfit(TEST_SPECTRUM, output_dir=a, z=0.1, **BASE_KWARGS)
+        Superfit(TEST_SPECTRUM, output_dir=b, z=0.2, **BASE_KWARGS)
+
+        assert first.parameters.save_results_path == a
+
+    def test_parameters_cannot_be_mutated_after_construction(self, tmp_path):
+        fit = Superfit(
+            TEST_SPECTRUM, output_dir=str(tmp_path) + "/", z=0.1, **BASE_KWARGS
+        )
+        with pytest.raises(AttributeError, match="immutable"):
+            fit.parameters.resolution = 30
 
 
 class TestConfigForms:

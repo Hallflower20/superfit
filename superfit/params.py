@@ -1,9 +1,16 @@
+"""Derived quantities for one fit.
+
+A :class:`Parameters` belongs to the fit that built it. It used to be
+process-global state, installed by ``set_config()`` and read back through a
+module-level proxy, which meant constructing a second ``Superfit`` silently
+retuned the first one -- so ``a = Superfit(s1, z=0.1); b = Superfit(s2,
+z=0.2); a.run()`` fitted s1 at z=0.2. Two fits in one process, and any kind
+of concurrency, were quietly wrong. Nothing here is global any more.
+"""
+
 import glob
 import numpy as np
 import os
-import sys
-import json
-from astropy.table import Table
 from superfit import config as config_module
 from superfit.auxiliary import select_templates
 from superfit.loggrid import (
@@ -21,76 +28,16 @@ parseJsonFile = config_module.parse_json_file
 load_config = config_module.load_config
 
 
-# The active configuration. Importing superfit must never require command-line
-# arguments -- that made the package impossible to use from a notebook, from
-# another script, or from a test. A configuration given on argv is still
-# picked up automatically so `python run.py parameters.json` keeps working.
-data = None
-_cached_parameters = None
-# The spectrum the active configuration refers to, when it was supplied as
-# arrays rather than as a path for Parameters to go and read.
-_active_spectrum = None
-
-
-def set_config(source, spectrum=None):
-    """Install ``source`` as the active configuration and return it."""
-
-    global data, _cached_parameters, _active_spectrum
-    data = load_config(source)
-    _cached_parameters = None
-    _active_spectrum = spectrum
-    return data
-
-
-def get_parameters():
-    """Return the active :class:`Parameters`, building it at most once.
-
-    ``Parameters`` globs the template bank and reads the object spectrum, so
-    the previous habit of constructing it at import time in four different
-    modules did that work four times per run.
-    """
-
-    global _cached_parameters
-    if _cached_parameters is None:
-        if data is None:
-            raise RuntimeError(
-                "No superfit parameters loaded. Call superfit.params.set_config(...) "
-                "with a dict or a path to a JSON file, pass one on the command "
-                "line, or use the Superfit(config=...) argument."
-            )
-        _cached_parameters = Parameters(data, spectrum=_active_spectrum)
-    return _cached_parameters
-
-
-class _LazyParameters:
-    """Attribute proxy so module-level ``parameters.foo`` resolves on first use.
-
-    Existing call sites read ``parameters.resolution`` and friends at call
-    time; this keeps them working without requiring a configuration to exist
-    at import time.
-    """
-
-    def __getattr__(self, name):
-        return getattr(get_parameters(), name)
-
-    def __repr__(self):
-        if data is None or _cached_parameters is None:
-            return "<superfit parameters: not loaded>"
-        return "<superfit parameters for {}>".format(_cached_parameters.object_to_fit)
-
-
-parameters = _LazyParameters()
-
-
-if len(sys.argv) > 1:
-    try:
-        set_config(sys.argv[1])
-    except ValueError:
-        # argv[1] is not a superfit config -- e.g. pytest arguments. Stay unloaded.
-        pass
-
-
 class Parameters:
+    """Everything one fit needs, derived once from one configuration.
+
+    Instances are frozen after construction: the fit reads them from several
+    modules and from worker processes, and a setting that can change halfway
+    through is a setting that cannot be trusted in the results.
+    """
+
+    _frozen = False
+
     def __init__(self, data, spectrum=None):
         """Derived quantities for one fit.
 
@@ -267,6 +214,34 @@ class Parameters:
 
         self.templates_sn_trunc = select_templates(templates_sn, self.temp_sn_tr)
         self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
+
+        self._frozen = True
+
+    def __setattr__(self, name, value):
+        if self._frozen:
+            raise AttributeError(
+                "Parameters is immutable once built; {!r} cannot be changed. "
+                "Build a new Superfit with the settings you want.".format(name)
+            )
+        object.__setattr__(self, name, value)
+
+    def __repr__(self):
+        return "<Parameters for {!r}: {} SN and {} galaxy templates>".format(
+            self.object_to_fit,
+            len(self.templates_sn_trunc),
+            len(self.templates_gal_trunc),
+        )
+
+    @property
+    def metadata_key(self):
+        """What a bank metadata scan actually depends on.
+
+        Used to cache the scan across fits: it walks every object directory
+        and parses ~190 CSVs, and two fits that differ only in redshift want
+        the same answer.
+        """
+
+        return (tuple(self.temp_sn_tr), self.epoch_low, self.epoch_high)
 
     def _observed_wavelength(self, spectrum):
         """The observed wavelength axis, from the Spectrum or from the file."""

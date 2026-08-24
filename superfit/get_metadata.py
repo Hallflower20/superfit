@@ -3,7 +3,6 @@ import numpy as np
 import os
 import pandas as pd
 import csv
-from superfit.params import get_parameters
 from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
@@ -24,9 +23,7 @@ def list_folders(path):
 
 class Metadata(object):
 
-    def __init__(self):
-
-        parameters = get_parameters()
+    def __init__(self, parameters):
 
         mjd_max_brightness = MJD_MAX_BRIGHTNESS_CSV
 
@@ -136,21 +133,25 @@ class Metadata(object):
 
 
 _cached_metadata = None
-_cached_for = None
+_cached_key = None
 
 
-def get_metadata():
-    """Return the bank metadata, scanning the bank at most once per config.
+def get_metadata(parameters):
+    """Return the bank metadata for ``parameters``, scanning the bank rarely.
 
     Building this walks every object directory and parses ~190 wiserep CSVs.
     It used to be done twice per run -- once in Superfit.__init__ and once in
     all_parameter_space -- for identical results.
+
+    The cache is keyed on what the scan actually reads (the SN types and the
+    epoch window), not on the identity of the Parameters object, so a second
+    fit that differs only in redshift reuses the first one's scan.
     """
 
-    global _cached_metadata, _cached_for
+    global _cached_metadata, _cached_key
 
-    params = get_parameters()
-    if _cached_metadata is None or _cached_for is not params:
-        _cached_metadata = Metadata()
-        _cached_for = params
+    key = parameters.metadata_key
+    if _cached_metadata is None or _cached_key != key:
+        _cached_metadata = Metadata(parameters)
+        _cached_key = key
     return _cached_metadata

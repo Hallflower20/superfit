@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 from superfit.get_metadata import get_metadata
 from superfit.error_routines import savitzky_golay, linear_error
-from superfit.params import parameters
 from superfit.Header_Binnings import (
     bin_spectrum_bank,
     kill_header,
@@ -652,7 +651,12 @@ def all_parameter_space(
 
     import time
 
-    metadata = get_metadata()
+    # Popped, not read: the rest of kwargs is forwarded to every worker, and
+    # the whole Parameters object -- template lists, grids -- has no business
+    # being pickled once per process.
+    parameters = kwargs.pop("parameters")
+    mask_galaxy_lines = parameters.mask_galaxy_lines
+    metadata = get_metadata(parameters)
 
     print("superfit started")
     #print(len(templates_sn_trunc))
@@ -677,7 +681,7 @@ def all_parameter_space(
             full_name = a[a.find("sne") :]
             one_sn = os.path.join(binning_dir(resolution), full_name)
 
-            if parameters.mask_galaxy_lines == 1:
+            if mask_galaxy_lines:
                 one_sn = np.loadtxt(one_sn)
                 one_sn = mask_lines_bank(one_sn)
             else:
@@ -692,19 +696,14 @@ def all_parameter_space(
 
             templates_sn_trunc_dict[short_name] = one_sn
 
-    elif parameters.resolution != 30 or parameters.resolution != 10:
-
+    else:
+        # Any other resolution: bin the original-resolution bank on the fly.
         for i in range(0, len(all_bank_files)):
 
-            if parameters.mask_galaxy_lines == 1:
-
-                one_sn = kill_header(all_bank_files[i])
+            one_sn = kill_header(all_bank_files[i])
+            if mask_galaxy_lines:
                 one_sn = mask_lines_bank(one_sn)
-                one_sn = bin_spectrum_bank(one_sn, resolution)
-
-            elif parameters.mask_galaxy_lines == 0:
-                one_sn = kill_header(all_bank_files[i])
-                one_sn = bin_spectrum_bank(one_sn, resolution)
+            one_sn = bin_spectrum_bank(one_sn, resolution)
 
             idx = all_bank_files[i].rfind("/") + 1
             filename = all_bank_files[i][idx:]
