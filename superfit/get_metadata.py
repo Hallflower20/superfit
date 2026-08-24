@@ -151,7 +151,14 @@ def get_metadata(parameters):
     global _cached_metadata, _cached_key
 
     key = parameters.metadata_key
-    if _cached_metadata is None or _cached_key != key:
-        _cached_metadata = Metadata(parameters)
-        _cached_key = key
-    return _cached_metadata
+    if _cached_metadata is not None and _cached_key == key:
+        return _cached_metadata
+
+    # Built into a local and returned from the local. Returning the global
+    # instead handed back whatever a concurrent caller had just cached --
+    # a different set of templates, silently -- and left the cache holding
+    # one fit's metadata under another fit's key for the rest of the process.
+    metadata = Metadata(parameters)
+    _cached_metadata = metadata
+    _cached_key = key
+    return metadata

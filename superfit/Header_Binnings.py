@@ -77,12 +77,11 @@ def kill_header(file_name):
     return spectrum
 
 
-def normalise_flux(flux):
-    """Divide flux by its median, guarding the case where that median is ~0.
+def normalisation_scale(flux):
+    """The divisor :func:`normalise_flux` would use.
 
-    A continuum-subtracted or sky-dominated spectrum can have a median
-    indistinguishable from zero, and dividing by it amplified the spectrum by
-    ~1e15. Fall back to the scatter when that happens.
+    Exposed separately so an uncertainty can be put on the same scale as the
+    flux it belongs to, without having to guess which branch below was taken.
     """
 
     flux = np.asarray(flux, dtype=float)
@@ -95,19 +94,30 @@ def normalise_flux(flux):
     mad = np.median(np.abs(finite - median))
 
     if np.abs(median) > 1e-3 * mad and median != 0:
-        return flux / median
+        return median
 
     warnings.warn(
         "median flux ({:.3g}) is negligible next to its scatter ({:.3g}); "
         "normalising by the scatter instead of the median".format(median, mad),
         RuntimeWarning,
-        stacklevel=2,
+        stacklevel=3,
     )
 
     if mad > 0:
-        return flux / (1.4826 * mad)
+        return 1.4826 * mad
 
     raise ValueError("spectrum flux is constant; cannot normalise it")
+
+
+def normalise_flux(flux):
+    """Divide flux by its median, guarding the case where that median is ~0.
+
+    A continuum-subtracted or sky-dominated spectrum can have a median
+    indistinguishable from zero, and dividing by it amplified the spectrum by
+    ~1e15. Fall back to the scatter when that happens.
+    """
+
+    return np.asarray(flux, dtype=float) / normalisation_scale(flux)
 
 
 def median_spacing(lam):

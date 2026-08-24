@@ -182,24 +182,36 @@ def _read_ascii(path, wanted):
 
     rows = []
     with open(path, "r") as handle:
-        for line in handle:
+        for number, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped or stripped[0] in "#%@" or stripped[0].isalpha():
                 continue
-            rows.append(stripped.split())
+            rows.append((number, stripped.split()))
 
     if not rows:
         raise SpectrumReadError("{} has no data rows.".format(path))
 
-    width = min(len(row) for row in rows)
+    width = len(rows[0][1])
     if width < 2:
         raise SpectrumReadError(
             "{} has only {} column(s); a spectrum needs wavelength and "
             "flux.".format(path, width)
         )
 
+    # Every row must have the same width. Taking the narrowest instead meant
+    # one truncated line at the end of a file silently dropped a column from
+    # all of it -- a three-column spectrum losing its uncertainties
+    # everywhere, with nothing said.
+    for number, row in rows:
+        if len(row) != width:
+            raise SpectrumReadError(
+                "{} line {} has {} columns but the first data row has {}. "
+                "Fix or remove the line; a ragged file cannot be read as one "
+                "spectrum.".format(path, number, len(row), width)
+            )
+
     try:
-        data = np.array([[float(value) for value in row[:width]] for row in rows])
+        data = np.array([[float(value) for value in row] for _, row in rows])
     except ValueError as exc:
         raise SpectrumReadError("{} has a non-numeric entry: {}".format(path, exc))
 
@@ -229,8 +241,17 @@ def _read_ascii(path, wanted):
     error_index = index_of("error", 2 if width > 2 else None)
     ivar_index = index_of("ivar", None)
 
-    for role, index in (("wavelength", lam_index), ("flux", flux_index)):
-        if index >= width:
+    # A column the caller asked for and the file does not have is an error,
+    # for the uncertainty as much as for the flux -- `--columns 0,1,3` on a
+    # three-column file used to yield no uncertainty at all, in silence.
+    requested = (("wavelength", lam_index), ("flux", flux_index))
+    if wanted.get("error") is not None:
+        requested += (("error", error_index),)
+    if wanted.get("ivar") is not None:
+        requested += (("ivar", ivar_index),)
+
+    for role, index in requested:
+        if index is not None and index >= width:
             raise SpectrumReadError(
                 "{} asks for {} in column {}, but the file has {} "
                 "columns.".format(path, role, index, width)
@@ -282,8 +303,19 @@ def _read_table(table, wanted, units, source):
 
     lam_name = column("wavelength", WAVELENGTH_NAMES, True)
     flux_name = column("flux", FLUX_NAMES, True)
-    ivar_name = column("ivar", IVAR_NAMES, False)
-    error_name = None if ivar_name else column("error", ERROR_NAMES, False)
+
+    # An uncertainty the caller named is the uncertainty they want. Guessing
+    # at an `ivar` column alongside it used to win, so a file carrying both
+    # `fluxerr` and a mostly-masked `ivar` silently produced an all-NaN error
+    # -- and an all-NaN sigma makes every chi2 infinite, which sorts into
+    # memory order and reports the first template in the bank as the match.
+    if wanted.get("error") is not None:
+        error_name, ivar_name = column("error", ERROR_NAMES, True), None
+    elif wanted.get("ivar") is not None:
+        error_name, ivar_name = None, column("ivar", IVAR_NAMES, True)
+    else:
+        ivar_name = column("ivar", IVAR_NAMES, False)
+        error_name = None if ivar_name else column("error", ERROR_NAMES, False)
 
     wavelength = np.asarray(table[lam_name], dtype=float).ravel()
     flux = np.asarray(table[flux_name], dtype=float).ravel()
@@ -327,9 +359,22 @@ def _wcs_wavelength(header, n_pixels):
 
     crval = header.get("CRVAL1")
     if crval is None:
-        return None, None
+        return None, "has no CRVAL1 to build a wavelength axis from"
 
-    cdelt = header.get("CDELT1", header.get("CD1_1", header.get("CDELT", 1.0)))
+    # No default step. Assuming 1 A/pixel for a file that does not say is the
+    # one mistake this module must not make: a 2000-pixel spectrum starting at
+    # 3800 A would be read as spanning 3800-5799 A, silently, and fitted
+    # against templates it does not overlap.
+    for keyword in ("CDELT1", "CD1_1", "CDELT"):
+        cdelt = header.get(keyword)
+        if cdelt is not None and float(cdelt) != 0.0:
+            break
+    else:
+        return None, (
+            "has CRVAL1 but no non-zero CDELT1, CD1_1 or CDELT, so the "
+            "wavelength step is unknown"
+        )
+
     crpix = header.get("CRPIX1", 1.0)
 
     # FITS pixels are 1-based, and CRPIX names the pixel where CRVAL holds.
@@ -376,16 +421,29 @@ def _read_fits(path, wanted, hdu_index):
             data = np.asarray(hdu.data)
             if data.ndim == 0:
                 continue
-            # Multispec files stack (flux, sky, error, ...) or several orders
-            # along the first axis; the first row is the flux.
-            flux = data if data.ndim == 1 else data.reshape(-1, data.shape[-1])[0]
+
+            if data.ndim == 1:
+                flux = data
+            elif hdu_index is not None:
+                # Multispec files stack (flux, sky, error, ...) or several
+                # orders along the first axis, and the first row is the flux.
+                # Only when the HDU was named, though: row 0 of a long-slit
+                # or drizzled 2-D frame is sky or a detector edge, and
+                # returning that as "the spectrum" is not a guess worth making
+                # on the caller's behalf.
+                flux = data.reshape(-1, data.shape[-1])[0]
+            else:
+                errors.append(
+                    "image HDU {!r} is {}-dimensional; name it with the hdu "
+                    "setting to read its first row as the spectrum".format(
+                        hdu.name, data.ndim
+                    )
+                )
+                continue
 
             wavelength, unit = _wcs_wavelength(hdu.header, flux.size)
             if wavelength is None:
-                errors.append(
-                    "image HDU {!r} has no CRVAL1 to build a wavelength axis "
-                    "from".format(hdu.name)
-                )
+                errors.append("image HDU {!r} {}".format(hdu.name, unit))
                 continue
 
             return wavelength, np.asarray(flux, dtype=float), None, unit

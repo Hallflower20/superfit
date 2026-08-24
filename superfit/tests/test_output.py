@@ -94,11 +94,26 @@ class TestRunDirectory:
         first.results_csv.write_text("old\n")
         first.binned_txt.write_text("old\n")
 
-        second = RunDirectory(tmp_path, "SN2021urb", overwrite=True)
+        second = RunDirectory(tmp_path, "SN2021urb", overwrite=True).begin()
 
         assert second.path == first.path
         assert not second.results_csv.exists()
         assert not second.binned_txt.exists()
+
+    def test_overwrite_keeps_the_old_run_until_the_fit_starts(self, tmp_path):
+        """Nothing is destroyed until there is something to replace it with.
+
+        Anything that fails between building the fit and running it -- an
+        unreadable spectrum, an interrupt -- would otherwise leave the caller
+        with neither the old results nor new ones.
+        """
+
+        first = RunDirectory(tmp_path, "SN2021urb")
+        first.results_csv.write_text("precious\n")
+
+        RunDirectory(tmp_path, "SN2021urb", overwrite=True)
+
+        assert first.results_csv.read_text() == "precious\n"
 
     def test_overwrite_clears_stale_plots(self, tmp_path):
         """A re-run asking for fewer plots must not leave the old tail behind."""
@@ -107,7 +122,7 @@ class TestRunDirectory:
         for rank in (1, 2, 3):
             run.plot(rank).write_text("old")
 
-        RunDirectory(tmp_path, "SN2021urb", overwrite=True)
+        RunDirectory(tmp_path, "SN2021urb", overwrite=True).begin()
 
         assert not list(run.path.glob("bestfit_*"))
 
@@ -117,10 +132,27 @@ class TestRunDirectory:
         notes.write_text("mine")
         (run.path / "subdir").mkdir()
 
-        RunDirectory(tmp_path, "SN2021urb", overwrite=True)
+        RunDirectory(tmp_path, "SN2021urb", overwrite=True).begin()
 
         assert notes.read_text() == "mine"
         assert (run.path / "subdir").is_dir()
+
+    def test_an_unwritable_location_is_not_reported_as_a_collision(self, tmp_path):
+        """--overwrite cannot help with a permissions problem, so do not
+        send the caller after it."""
+
+        import os
+        import stat
+
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        os.chmod(locked, stat.S_IREAD | stat.S_IEXEC)
+        try:
+            with pytest.raises(OSError) as caught:
+                RunDirectory(locked, "SN2021urb")
+            assert not isinstance(caught.value, OutputExistsError)
+        finally:
+            os.chmod(locked, stat.S_IRWXU)
 
     def test_a_directory_with_no_results_is_not_a_collision(self, tmp_path):
         """An empty or half-written directory is not a result worth guarding."""

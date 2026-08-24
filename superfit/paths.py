@@ -82,24 +82,34 @@ def _user_data_bank_dir():
 
 
 def find_bank_dir(use_cache=True):
-    """Return the template bank directory, or raise with a useful message."""
+    """Return the template bank directory, or raise with a useful message.
 
-    global _cached_bank_dir
+    ``use_cache=False`` re-resolves without touching the cache. It used to
+    overwrite it, so merely *inspecting* the bank -- ``superfit bank status``,
+    ``superfit doctor`` -- silently discarded a directory the caller had
+    chosen with :func:`set_bank_dir`, and the next fit ran against a
+    different bank than the one just reported.
+    """
 
     if use_cache and _cached_bank_dir is not None:
         return _cached_bank_dir
 
+    def remember(path):
+        global _cached_bank_dir
+        path = os.path.abspath(path)
+        if use_cache:
+            _cached_bank_dir = path
+        return path
+
     override = _env_override()
     if override is not None:
-        _cached_bank_dir = os.path.abspath(override)
-        return _cached_bank_dir
+        return remember(override)
 
     tried = []
     for candidate in _candidate_bank_dirs():
         tried.append(candidate)
         if os.path.isdir(candidate):
-            _cached_bank_dir = os.path.abspath(candidate)
-            return _cached_bank_dir
+            return remember(candidate)
 
     raise FileNotFoundError(
         "Could not locate the superfit template bank. Looked in:\n  "

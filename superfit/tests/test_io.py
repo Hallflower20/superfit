@@ -83,6 +83,29 @@ class TestAscii:
             read_spectrum(path)
 
 
+class TestAsciiIsNotSilentlyLenient:
+    def test_a_ragged_file_is_refused_rather_than_truncated(self, tmp_path):
+        """One short line used to drop a column from the whole file."""
+
+        path = tmp_path / "ragged.flm"
+        with open(path, "w") as handle:
+            for row in zip(LAM, FLUX, ERR):
+                handle.write("{} {} {}\n".format(*row))
+            handle.write("9000.0 1.0\n")
+
+        with pytest.raises(SpectrumReadError, match="line 201 has 2 columns"):
+            read_spectrum(path)
+
+    def test_an_out_of_range_error_column_is_refused(self, tmp_path):
+        """`--columns 0,1,3` on a 3-column file used to yield no error."""
+
+        path = tmp_path / "three.flm"
+        np.savetxt(path, np.column_stack([LAM, FLUX, ERR]))
+
+        with pytest.raises(SpectrumReadError, match="asks for error in column 3"):
+            read_spectrum(path, columns=[0, 1, 3])
+
+
 class TestUnits:
     @pytest.mark.parametrize(
         "unit,factor",
@@ -226,6 +249,38 @@ class TestFitsTables:
         assert np.isnan(error[:5]).all()
         assert np.isfinite(error[5:]).all()
 
+    def test_a_named_error_column_beats_a_guessed_ivar(self, tmp_path):
+        """The caller's explicit choice must not lose to name-guessing.
+
+        A file carrying both, where the ivar is mostly masked, gave an
+        all-NaN error -- and an all-NaN sigma makes every chi2 infinite,
+        which sorts into memory order and reports the first template in the
+        bank as a confident match.
+        """
+
+        masked_ivar = np.zeros_like(ERR)
+        path = write_fits_table(
+            tmp_path / "s.fits",
+            {"wave": LAM, "flux": FLUX, "fluxerr": ERR, "ivar": masked_ivar},
+        )
+
+        _, _, error = read_spectrum(path, columns=["wave", "flux", "fluxerr"])
+
+        np.testing.assert_allclose(error, ERR)
+
+    def test_ivar_can_still_be_asked_for_explicitly(self, tmp_path):
+        ivar = 1.0 / ERR**2
+        path = write_fits_table(
+            tmp_path / "s.fits",
+            {"wave": LAM, "flux": FLUX, "fluxerr": ERR * 10, "ivar": ivar},
+        )
+
+        _, _, error = read_spectrum(
+            path, columns={"wavelength": "wave", "flux": "flux", "ivar": "ivar"}
+        )
+
+        np.testing.assert_allclose(error, ERR)
+
     def test_a_named_hdu_can_be_asked_for(self, tmp_path):
         from astropy.io import fits
 
@@ -341,7 +396,9 @@ class TestFitsImages:
 
         np.testing.assert_allclose(wavelength, 10.0**log, rtol=1e-10)
 
-    def test_a_multispec_stack_uses_the_first_band(self, tmp_path):
+    def test_a_named_multispec_stack_uses_the_first_band(self, tmp_path):
+        """Naming the HDU is how you say "yes, row 0 is the flux"."""
+
         from astropy.io import fits
 
         step = LAM[1] - LAM[0]
@@ -351,7 +408,7 @@ class TestFitsImages:
         path = tmp_path / "s.fits"
         hdu.writeto(path)
 
-        wavelength, flux, _ = read_spectrum(path)
+        wavelength, flux, _ = read_spectrum(path, hdu=0)
 
         np.testing.assert_allclose(flux, FLUX)
         np.testing.assert_allclose(wavelength, LAM)
@@ -360,6 +417,41 @@ class TestFitsImages:
         path = self._image(tmp_path, {})
 
         with pytest.raises(SpectrumReadError, match="No HDU"):
+            read_spectrum(path)
+
+    def test_a_missing_dispersion_keyword_is_refused(self, tmp_path):
+        """It used to default to 1 A/pixel, silently mis-registering the file."""
+
+        path = self._image(tmp_path, {"CRVAL1": 3800.0})
+
+        with pytest.raises(SpectrumReadError, match="wavelength step is unknown"):
+            read_spectrum(path)
+
+    def test_a_zero_dispersion_falls_through_to_the_next_keyword(self, tmp_path):
+        """Some IRAF writers set CDELT1 = 0 alongside a real CD1_1."""
+
+        step = LAM[1] - LAM[0]
+        path = self._image(
+            tmp_path,
+            {"CRVAL1": LAM[0], "CDELT1": 0.0, "CD1_1": step, "CRPIX1": 1},
+        )
+
+        wavelength, _, _ = read_spectrum(path)
+
+        np.testing.assert_allclose(wavelength, LAM)
+
+    def test_a_two_dimensional_image_is_not_guessed_at(self, tmp_path):
+        """Row 0 of a long-slit frame is sky, not the spectrum."""
+
+        from astropy.io import fits
+
+        step = LAM[1] - LAM[0]
+        hdu = fits.PrimaryHDU(np.vstack([FLUX * 99, FLUX]))
+        hdu.header.update({"CRVAL1": LAM[0], "CDELT1": step, "CRPIX1": 1})
+        path = tmp_path / "s.fits"
+        hdu.writeto(path)
+
+        with pytest.raises(SpectrumReadError, match="2-dimensional"):
             read_spectrum(path)
 
 

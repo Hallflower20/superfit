@@ -167,6 +167,11 @@ PROFILES = {
 
 DEFAULT_PROFILE = "legacy"
 
+# Recorded when the settings that came out do not match any named profile.
+# Accepted on the way back in -- applying nothing -- so that a config.json
+# written by such a run still loads, which is the whole point of writing it.
+CUSTOM_PROFILE = "custom"
+
 
 # Shorthand accepted by Superfit(...) and mapped onto real config keys.
 # These exist because "z=0.127" is what someone means, and
@@ -284,6 +289,17 @@ def strip_comments(config):
     return {k: v for k, v in config.items() if not str(k).startswith("_")}
 
 
+def _matches_profile(config, name):
+    """True when a merged config still says what its profile says."""
+
+    return all(
+        as_bool(config[key], key) == as_bool(value, key)
+        if key in BOOLEAN_KEYS
+        else config[key] == value
+        for key, value in PROFILES.get(name, {}).items()
+    )
+
+
 def load_config(source=None, profile=None, **overrides):
     """Build a complete configuration.
 
@@ -311,7 +327,7 @@ def load_config(source=None, profile=None, **overrides):
 
     name = profile or resolved.pop("profile", None) or raw.pop("profile", None)
     name = name or DEFAULT_PROFILE
-    if name not in PROFILES:
+    if name not in PROFILES and name != CUSTOM_PROFILE:
         raise ConfigError(
             "Unknown profile {!r}. Available profiles: {}.".format(
                 name, ", ".join(sorted(PROFILES))
@@ -319,10 +335,15 @@ def load_config(source=None, profile=None, **overrides):
         )
 
     config = copy.deepcopy(DEFAULT_CONFIG)
-    config.update(PROFILES[name])
+    config.update(PROFILES.get(name, {}))
     config.update(raw)
     config.update(resolved)
-    config["profile"] = name
+
+    # A setting given directly can contradict the profile it was applied
+    # over -- `{"profile": "legacy", "weighted_solve": true}` is not a legacy
+    # run. The recorded name has to describe the settings that came out, or
+    # config.json is not a record of what happened.
+    config["profile"] = name if _matches_profile(config, name) else "custom"
 
     unknown = set(config) - set(DEFAULT_CONFIG)
     if unknown:

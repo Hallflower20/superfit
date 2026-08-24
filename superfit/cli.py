@@ -826,13 +826,11 @@ def main(argv=None, prog="superfit"):
 
     try:
         return args.handler(args)
-    except (
-        BankError,
-        ConfigError,
-        OutputExistsError,
-        FileNotFoundError,
-        ValueError,
-    ) as exc:
+    except (BankError, ConfigError, OutputExistsError, OSError, ValueError) as exc:
+        # OSError covers the output directory being unwritable or out of
+        # quota. It used to reach the user as a traceback, or -- worse --
+        # disguised as "already exists", which sent them after an --overwrite
+        # flag that could not have helped.
         print("error: {}".format(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:

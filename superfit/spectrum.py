@@ -258,8 +258,19 @@ class Spectrum:
 
         from scipy import stats
 
+        from superfit.Header_Binnings import median_spacing, normalisation_scale
+
         lam = self.wavelength
         flux = self.flux
+
+        # A spectrum already sampled more coarsely than `resolution` is passed
+        # through by bin_spectrum_bank unbinned, divided only by its median.
+        # The error has to take the same branch: re-binning it here regardless
+        # produced one fewer point than the flux, and Spectrum rejected the
+        # pair. A three-column spectrum sampled at exactly the default 10 A --
+        # an entirely ordinary file -- could not be fitted at all.
+        if median_spacing(lam) >= resolution:
+            return self.error / normalisation_scale(flux)
 
         # Mirror bin_spectrum_bank so the two cannot drift apart.
         n_bins = math.floor((lam[-1] - lam[0]) / resolution)

@@ -69,6 +69,11 @@ defaults and under everything else.
 | `legacy` (default) | off | Reproducing published superfit results. |
 | `modern` | on | New work; the statistically consistent choice. |
 
+A setting given directly wins over the profile it was applied over, and the
+recorded profile then reads `custom` — `{"profile": "legacy",
+"weighted_solve": true}` is not a legacy run, and `config.json` has to
+describe the settings that came out. A `custom` config reloads unchanged.
+
 ```bash
 superfit fit spectrum.flm --z 0.1 --profile modern
 ```
@@ -115,10 +120,13 @@ Left unset, columns are matched against the usual spellings:
 
 For ascii files, columns are taken by position — 0, 1, 2 — unless the file
 has a commented header line naming them, as in `# wavelength flux fluxerr`,
-in which case names work too.
+in which case names work too. Every data row must have the same number of
+columns; a ragged file is refused, naming the line, rather than silently
+narrowed to its shortest row.
 
 Inverse variance is converted to an uncertainty; entries that are zero or
-negative become NaN rather than infinity.
+negative become NaN rather than infinity. Naming an error column explicitly
+takes precedence over an `ivar` column that happens to be in the same file.
 
 `wavelength_unit` — `AA`, `nm`, `micron`, `mm`, `cm`, `m`, or `log10(AA)`.
 Left unset, taken from the file's `TUNIT`/`CUNIT1` keyword, and Angstroms
@@ -127,8 +135,14 @@ log10(Angstrom) even without a unit. An explicit value wins over the file, so
 this is also how you correct a mislabelled one.
 
 `spectrum_hdu` — which FITS HDU to read, by index or by name. Left unset,
-each is tried in turn: binary tables by column name, then image HDUs by
-their wavelength WCS (`CRVAL1`/`CDELT1`/`CRPIX1`, linear or log-linear).
+each is tried in turn: binary tables by column name, then one-dimensional
+image HDUs by their wavelength WCS (`CRVAL1` plus `CDELT1` or `CD1_1`, with
+`CRPIX1`, linear or log-linear).
+
+An image HDU with no dispersion keyword is refused rather than assumed to be
+1 A per pixel, and a *two*-dimensional image is only read when you name its
+HDU — for a multispec stack the first row is the flux, but for a long-slit
+or drizzled frame it is sky, and that is not a guess worth making for you.
 
 ## Redshift
 

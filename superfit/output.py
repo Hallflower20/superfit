@@ -73,28 +73,42 @@ class RunDirectory:
     def __init__(self, base, name, overwrite=False):
         base = Path(base).expanduser() if base else Path.cwd()
         self.name = safe_name(name)
-        self.path = base.expanduser() / self.name
-        self._prepare(bool(overwrite))
+        self.path = base / self.name
+        self.overwrite = bool(overwrite)
+        self._prepare()
 
-    def _prepare(self, overwrite):
-        results = self.path / RESULTS_CSV
+    def _prepare(self):
+        """Check the directory is usable, and create it. Delete nothing.
 
-        if results.exists() and not overwrite:
+        Checking here means an unusable location is reported before the fit
+        runs rather than after it. Deleting here would mean the opposite of
+        what the guard is for: anything that failed between construction and
+        the first write -- an unreadable spectrum, an interrupt -- would
+        leave the caller with neither the old results nor new ones.
+        """
+
+        if (self.path / RESULTS_CSV).exists() and not self.overwrite:
             raise OutputExistsError(
                 "{} already holds a fit of {!r}. Pass overwrite=True (or "
                 "--overwrite) to replace it, or point --output somewhere "
                 "else.".format(self.path, self.name)
             )
 
-        try:
-            self.path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise OutputExistsError(
-                "Could not create the output directory {}: {}".format(self.path, exc)
-            )
+        # An OSError here is a permissions or quota problem, and is left as
+        # itself: reporting it as "already exists" would send the caller
+        # after an --overwrite flag that cannot help them.
+        self.path.mkdir(parents=True, exist_ok=True)
 
-        if overwrite:
+    def begin(self):
+        """Called when the fit is about to write. Clears a previous run.
+
+        Separate from construction so the old results survive right up to
+        the moment there is something to replace them with.
+        """
+
+        if self.overwrite:
             self._clear()
+        return self
 
     def _clear(self):
         """Remove what a previous run of this fit left, and nothing else.

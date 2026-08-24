@@ -152,8 +152,6 @@ class Superfit:
 
         self.metadata = get_metadata(parameters)
 
-        self._write_used_config()
-
     @staticmethod
     def _resolve_spectrum(spectrum, wavelength, flux, error, name, reading=None):
         """Turn whichever of the input forms was used into a Spectrum."""
@@ -316,6 +314,12 @@ class Superfit:
                 self.name_no_extension, parameters.resolution
             )
         )
+
+        # Everything that could stop the fit has now happened, so this is the
+        # first safe moment to disturb a previous run of it.
+        self.output.begin()
+        self._artifacts = []
+        self._write_used_config()
 
         if save_binned:
             self._write_binned()

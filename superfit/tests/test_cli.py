@@ -169,6 +169,21 @@ class TestProfiles:
 
         assert load_config(profile="modern")["profile"] == "modern"
 
+    def test_a_setting_that_contradicts_the_profile_is_not_recorded_as_it(self):
+        """config.json has to describe the settings that came out."""
+
+        assert load_config({"weighted_solve": True})["profile"] == "custom"
+        assert load_config(profile="modern", weighted_solve=False)["profile"] == (
+            "custom"
+        )
+
+    def test_a_custom_config_still_reloads(self):
+        """Which is the whole point of writing config.json."""
+
+        recorded = load_config({"weighted_solve": True})
+
+        assert load_config(recorded) == recorded
+
 
 class TestBackwardsCompatibility:
     def test_a_bare_json_path_still_means_a_config(self):
