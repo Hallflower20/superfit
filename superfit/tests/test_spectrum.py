@@ -179,6 +179,37 @@ class TestBinning:
         spectrum = Spectrum.from_file(TEST_SPECTRUM)
         assert len(spectrum.binned(10)) < len(spectrum)
 
+    @pytest.mark.parametrize("sampling", [10.0, 12.0, 25.0])
+    def test_a_spectrum_already_coarser_than_the_resolution_keeps_its_error(
+        self, sampling
+    ):
+        """bin_spectrum_bank passes such a spectrum through unbinned. The
+        error has to take the same branch, or the two come back different
+        lengths and Spectrum rejects the pair -- which made a three-column
+        spectrum sampled at exactly the default 10 A unfittable."""
+
+        lam = np.arange(4000.0, 9000.0, sampling)
+        flux = 1.0 + 0.1 * np.sin(lam / 200.0)
+        spectrum = Spectrum(lam, flux, error=np.full_like(flux, 0.02))
+
+        binned = spectrum.binned(10)
+
+        assert binned.error is not None
+        assert binned.error.shape == binned.flux.shape
+        assert np.isfinite(binned.error).all()
+
+    def test_the_passthrough_error_is_on_the_same_scale_as_the_flux(self):
+        """The flux is divided by its median on the way through; so is the error."""
+
+        lam = np.arange(4000.0, 9000.0, 10.0)
+        flux = np.full_like(lam, 4.0)
+        flux[::2] = 6.0                        # median 5, well away from zero
+        spectrum = Spectrum(lam, flux, error=np.full_like(flux, 0.5))
+
+        binned = spectrum.binned(10)
+
+        np.testing.assert_allclose(binned.error, 0.5 / 5.0)
+
 
 class TestLengthCheck:
     def test_accepts_a_normal_spectrum(self):

@@ -87,7 +87,7 @@ def run_pipeline(config, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     config = dict(config)
     config["object_to_fit"] = TEST_SPECTRUM
-    config["saving_results_path"] = out_dir.rstrip("/") + "/"
+    config["saving_results_path"] = out_dir
     config["show_plot"] = 0
     config["how_many_plots"] = 0
 
@@ -114,8 +114,10 @@ def run_pipeline(config, out_dir):
             )
         )
 
-    stem = os.path.basename(TEST_SPECTRUM).rsplit(".", 1)[0]
-    return pd.read_csv(os.path.join(out_dir, stem + ".csv"))
+    from superfit.output import RESULTS_CSV, safe_name
+
+    stem = safe_name(os.path.basename(TEST_SPECTRUM).rsplit(".", 1)[0])
+    return pd.read_csv(os.path.join(out_dir, stem, RESULTS_CSV))
 
 
 @needs_bank

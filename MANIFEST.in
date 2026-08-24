@@ -1,6 +1,7 @@
 include README.md
 include requirements.txt
 include parameters.json
+recursive-include docs *.md
 recursive-include superfit/tests/data *.flm
 recursive-include superfit/tests/golden *.csv
 

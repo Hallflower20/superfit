@@ -13,7 +13,8 @@ from superfit.config import ConfigError, load_config
 from superfit.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
 from superfit.error_routines import linear_error, savitzky_golay
 from superfit.get_metadata import get_metadata
-from superfit.params import parameters, get_parameters, set_config
+from superfit.output import FitResult, RunDirectory
+from superfit.params import Parameters
 from superfit.paths import gal_dir, sne_dir
 from superfit.spectrum import Spectrum
 
@@ -54,6 +55,13 @@ class Superfit:
 
     Anything not specified takes its value from
     :data:`superfit.config.DEFAULT_CONFIG`.
+
+    Each instance owns its settings, as ``self.parameters``. Building a
+    second Superfit does not disturb the first, so several fits can be set
+    up and then run in any order. Two threads may call ``run()`` at once and
+    both get the right answer, but they take turns over the fit itself --
+    which is already spread across every core, so there is nothing to gain
+    by it. To fit many spectra at once, use separate processes.
     """
 
     def __init__(
@@ -71,11 +79,29 @@ class Superfit:
         if config is None and _looks_like_config(spectrum):
             config, spectrum = spectrum, None
 
+        # Settings first, spectrum second. Merging and validating is pure and
+        # instant; reading a spectrum is I/O. A misspelled setting should be
+        # reported as a misspelled setting, not hidden behind whatever the
+        # filesystem happens to say about a path that was also wrong.
+        merged = load_config(config, **overrides)
+
+        # How to read a spectrum given as a path: which columns, what unit
+        # the wavelengths are in, which FITS HDU. See superfit.io.
+        reading = {
+            "columns": merged["spectrum_columns"],
+            "wavelength_unit": merged["wavelength_unit"],
+            "hdu": merged["spectrum_hdu"],
+        }
+
         spectrum = self._resolve_spectrum(
-            spectrum, wavelength=wavelength, flux=flux, error=error, name=name
+            spectrum,
+            wavelength=wavelength,
+            flux=flux,
+            error=error,
+            name=name,
+            reading=reading,
         )
 
-        merged = load_config(config, **overrides)
         if spectrum is None:
             if not merged["object_to_fit"]:
                 raise ConfigError(
@@ -83,12 +109,14 @@ class Superfit:
                     "wavelength= and flux= arrays, or set 'object_to_fit' in "
                     "the configuration."
                 )
-            spectrum = Spectrum.from_file(merged["object_to_fit"])
+            spectrum = Spectrum.from_file(merged["object_to_fit"], name=name, **reading)
         elif not merged["object_to_fit"]:
             # Recorded in *_used.json so the run stays self-describing.
             merged["object_to_fit"] = spectrum.name
 
-        set_config(merged, spectrum=spectrum)
+        # This fit's own settings. Nothing about them is global, so a second
+        # Superfit built after this one cannot change what this one does.
+        self.parameters = parameters = Parameters(merged, spectrum=spectrum)
 
         self.observation = spectrum.check_long_enough(parameters.resolution)
 
@@ -100,10 +128,14 @@ class Superfit:
         self.flux = spectrum.flux
         self.spectrum = spectrum.as_array()
 
-        prefix = parameters.save_results_path
-        self.binned_name = prefix + self.name_no_extension + "_binned.txt"
-        self.results_name = prefix + self.name_no_extension
-        self.results_path = self.results_name + ".csv"
+        # Created now rather than at save time: a directory that cannot be
+        # written, or that already holds a fit of this spectrum, is worth
+        # hearing about before the fit runs, not thirty seconds after.
+        self.output = RunDirectory(
+            parameters.save_results_path, self.name, overwrite=parameters.overwrite
+        )
+        self.results_path = self.output.results_csv
+        self._artifacts = []
 
         # What the chi2 is measured against: masked, normalised, resampled.
         masked = spectrum
@@ -118,12 +150,10 @@ class Superfit:
         # The error spectrum is measured on the binned, *unmasked* observation.
         self.binned = spectrum.binned(parameters.resolution)
 
-        self.metadata = get_metadata()
-
-        self._write_used_config()
+        self.metadata = get_metadata(parameters)
 
     @staticmethod
-    def _resolve_spectrum(spectrum, wavelength, flux, error, name):
+    def _resolve_spectrum(spectrum, wavelength, flux, error, name, reading=None):
         """Turn whichever of the input forms was used into a Spectrum."""
 
         if wavelength is not None or flux is not None:
@@ -140,20 +170,20 @@ class Superfit:
         if spectrum is None:
             return None
 
-        return Spectrum.coerce(spectrum, name=name)
+        return Spectrum.coerce(spectrum, name=name, **(reading or {}))
 
     def _write_used_config(self):
         """Record the effective configuration next to the results."""
 
-        used_json = parameters.save_results_path + "{}_used.json".format(
-            self.name_no_extension
-        )
+        used_json = self.output.used_config_json
         try:
             with open(used_json, "w") as handle:
-                json.dump(parameters.config, handle, indent=2, default=str)
+                json.dump(self.parameters.config, handle, indent=2, default=str)
         except OSError as exc:
             # Not being able to write the audit file should not lose the fit.
             print("WARNING: could not write {}: {}".format(used_json, exc))
+        else:
+            self._artifacts.append(used_json)
 
     def plot(self):
 
@@ -174,7 +204,8 @@ class Superfit:
 
     def mask_galaxy_lines(self):
 
-        if parameters.use_exact_z != 1:
+        parameters = self.parameters
+        if not parameters.use_exact_z:
             raise Exception(
                 "Make sure to pick an exact value for z in order to mask the host lines accordingly!"
             )
@@ -245,7 +276,7 @@ class Superfit:
 
     def mask_gal_lines_and_telluric(self):
 
-        Data_masked = mask_gal_lines(self.name, z_obj=parameters.redshift)
+        Data_masked = mask_gal_lines(self.name, z_obj=self.parameters.redshift)
         masked_spectrum = remove_telluric(Data_masked)
 
         plt.figure(figsize=(7 * np.sqrt(2), 7))
@@ -269,15 +300,26 @@ class Superfit:
 
         Returns
         -------
-        pandas.DataFrame
-            One row per surviving template, best match first.
+        FitResult
+            The ranked table -- one row per surviving template, best match
+            first -- together with the directory the run was written to and
+            every file in it. It indexes and iterates like the DataFrame it
+            wraps, which is also available as ``.results``.
         """
+
+        parameters = self.parameters
 
         print(
             "Running optimization for spectrum: {0} with resolution = {1} Å".format(
                 self.name_no_extension, parameters.resolution
             )
         )
+
+        # Everything that could stop the fit has now happened, so this is the
+        # first safe moment to disturb a previous run of it.
+        self.output.begin()
+        self._artifacts = []
+        self._write_used_config()
 
         if save_binned:
             self._write_binned()
@@ -294,30 +336,38 @@ class Superfit:
             kind=parameters.kind,
             original=self.binned,
             spectrum_name=self.name,
-            save=self.results_name,
+            results_path=self.results_path,
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
             n_cores=parameters.n_cores,
             observed_grid=parameters.observed_grid,
             weighted_solve=parameters.weighted_solve,
             R_v=parameters.R_v,
+            parameters=parameters,
         )
 
         self.results = pd.read_csv(self.results_path)
+        self._artifacts.append(self.results_path)
+
         self._plot_best_fits()
-        return self.results
+
+        self.result = FitResult(self.results, self.output, self._artifacts)
+        return self.result
 
     def _write_binned(self):
         """Save the binned observation as two columns of text."""
 
+        binned_txt = self.output.binned_txt
         try:
             np.savetxt(
-                self.binned_name,
+                binned_txt,
                 np.column_stack([self.binned.wavelength, self.binned.flux]),
                 fmt="%s",
             )
         except OSError as exc:
-            print("WARNING: could not write {}: {}".format(self.binned_name, exc))
+            print("WARNING: could not write {}: {}".format(binned_txt, exc))
+        else:
+            self._artifacts.append(binned_txt)
 
     def superfit(self):
         """Backwards-compatible alias for :meth:`run`."""
@@ -325,84 +375,90 @@ class Superfit:
         return self.run()
 
     def _plot_best_fits(self):
+        """Plot the top ``how_many_plots`` matches into the run directory."""
 
-        result_number = 0
+        for j in range(min(self.parameters.n, len(self.results))):
+            self._artifacts.append(self.plot_rank(j))
 
-        if parameters.n > len(self.results):
+    # NOTE: there is no results() method. `run()` assigns self.results, which
+    # would shadow any method of that name anyway; the old one was
+    # unreachable and returned itself.
 
-            result_number = result_number + len(self.results)
+    def plot_rank(self, j):
+        """Plot the ``j``-th ranked match against the observation.
 
-        elif len(self.results) >= parameters.n:
+        ``j`` counts from 0, as the results table does; the file is named
+        for the rank, counting from 1. Returns the path it wrote.
+        """
 
-            result_number = result_number + parameters.n
+        parameters = self.parameters
+        row = self.results.iloc[j]
 
-        for j in range(result_number):
+        short_name = row["SN"]
+        bb = row["CONST_SN"]
+        dd = row["CONST_GAL"]
+        z = row["Z"]
+        extmag = row["A_v"]
+        sn_cont = row["Frac(SN)"]
 
-            row = self.results.iloc[j]
-
-            hg_name = row["GALAXY"]
-            short_name = row["SN"]
-            bb = row["CONST_SN"]
-            dd = row["CONST_GAL"]
-            z = row["Z"]
-            extmag = row["A_v"]
-            sn_cont = row["Frac(SN)"]
-
-            # Get all names from the dictionary
-            full_names = [str(x) for x in self.metadata.shorhand_dict.keys()]
-            short_names = [str(x) for x in self.metadata.shorhand_dict.values()]
-
-            # print(full_names)
-
-            for i in range(0, len(short_names)):
-                if str(short_names[i]) == str(short_name):
-                    sn_best_fullname = full_names[i]
-                    sn_short_name = short_names[i]
-                    idx = sn_short_name.rfind("/")
-                    subtype = sn_short_name[:idx]
-
-            int_obj = self.int_obj
-
-            sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
-            hg_name = os.path.join(gal_dir(10), hg_name)
-
-            # print(sn_name)
-
-            nova = kill_header(sn_name)
-            nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
-
-            host = np.loadtxt(hg_name)
-            host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
-
-            # Interpolate supernova and host galaxy. This reconstructs the
-            # model the fitter scored, so the reddening has to match it: the
-            # law is evaluated at nova[:, 0], the template's REST wavelength,
-            # exactly as the fit evaluates it at lam / (1 + z).
-            redshifted_nova = nova[:, 0] * (z + 1)
-            extinct_nova = (
-                nova[:, 1]
-                * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
-                / (z + 1)
+        # The results table carries the shorthand name; the file it came from
+        # is the key of the same entry. Inverting the dict once beats the
+        # linear scan this used to do per plot, and gives a real error rather
+        # than a NameError when a name is missing.
+        by_shorthand = {
+            str(v): str(k) for k, v in self.metadata.shorhand_dict.items()
+        }
+        if str(short_name) not in by_shorthand:
+            raise KeyError(
+                "No template file for {!r} in the bank metadata; the results "
+                "were produced against a different bank.".format(short_name)
             )
+        sn_best_fullname = by_shorthand[str(short_name)]
+        subtype = str(short_name)[: str(short_name).rfind("/")]
 
-            reshifted_host = host[:, 0] * (z + 1)
-            reshifted_hostf = host[:, 1] / (z + 1)
+        sn_path = os.path.join(sne_dir(10), subtype, sn_best_fullname)
+        hg_path = os.path.join(gal_dir(10), row["GALAXY"])
 
-            nova_int = interpolate.interp1d(
-                redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
+        nova = kill_header(sn_path)
+        nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
+
+        host = np.loadtxt(hg_path)
+        host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
+
+        # Reconstruct the model the fitter scored, so the reddening has to
+        # match it: the law is evaluated at nova[:, 0], the template's REST
+        # wavelength, exactly as the fit evaluates it at lam / (1 + z).
+        redshifted_nova = nova[:, 0] * (z + 1)
+        extinct_nova = (
+            nova[:, 1]
+            * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
+            / (z + 1)
+        )
+
+        nova_int = interpolate.interp1d(
+            redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
+        )
+        host_int = interpolate.interp1d(
+            host[:, 0] * (z + 1), host[:, 1] / (z + 1),
+            bounds_error=False, fill_value="nan",
+        )
+        host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
+
+        sn_type = short_name[: short_name.find("/")]
+        subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
+        phase = str(short_name[short_name.rfind(":") + 1 : -1])
+
+        path = self.output.plot(j + 1, png=parameters.show_plot_png)
+
+        # Held explicitly rather than left on pyplot's global stack: a batch
+        # of a few hundred fits used to accumulate every figure it had ever
+        # drawn, because nothing ever closed them.
+        figure = plt.figure(figsize=(8 * np.sqrt(2), 8))
+        try:
+            plt.plot(
+                parameters.lam, self.int_obj, "r",
+                label="Input object: " + self.name,
             )
-            host_int = interpolate.interp1d(
-                reshifted_host, reshifted_hostf, bounds_error=False, fill_value="nan"
-            )
-            host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
-
-            sn_type = short_name[: short_name.find("/")]
-            hg_name = hg_name[hg_name.rfind("/") + 1 :]
-            subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
-            phase = str(short_name[short_name.rfind(":") + 1 : -1])
-
-            plt.figure(figsize=(8 * np.sqrt(2), 8))
-            plt.plot(parameters.lam, int_obj, "r", label="Input object: " + self.name)
             plt.plot(
                 parameters.lam,
                 host_nova,
@@ -414,7 +470,7 @@ class Superfit:
                 + " - Phase: "
                 + phase
                 + "\nHost: "
-                + str(hg_name)
+                + str(os.path.basename(hg_path))
                 + "\nSN contrib: {0: .1f}%".format(100 * sn_cont),
             )
             plt.legend(framealpha=1, frameon=True, fontsize=12)
@@ -422,105 +478,19 @@ class Superfit:
             plt.xlabel("Lamda", fontsize=14)
             plt.title("Best fit for z = " + str(z), fontsize=15, fontweight="bold")
 
-            if parameters.show_plot_png:
-                plt.savefig(self.results_name + "_" + str(j) + ".png")
-            else:
-                plt.savefig(self.results_name + "_" + str(j) + ".pdf")
+            plt.savefig(path)
 
-            if parameters.show == 1:
+            if parameters.show:
                 plt.show()
+        finally:
+            plt.close(figure)
 
-    # NOTE: there is no results() method. `run()` assigns self.results, which
-    # would shadow any method of that name anyway; the old one was
-    # unreachable and returned itself.
+        return path
 
     def any_result(self, j):
+        """Backwards-compatible alias for :meth:`plot_rank`."""
 
-        row = self.results.iloc[j]
-
-        hg_name = row["GALAXY"]
-        short_name = row["SN"]
-        bb = row["CONST_SN"]
-        dd = row["CONST_GAL"]
-        z = row["Z"]
-        extmag = row["A_v"]
-        sn_cont = row["Frac(SN)"]
-
-        # Get all names from the dictionary
-        full_names = [str(x) for x in self.metadata.shorhand_dict.keys()]
-        short_names = [str(x) for x in self.metadata.shorhand_dict.values()]
-
-        for i in range(0, len(short_names)):
-            if str(short_names[i]) == str(short_name):
-                sn_best_fullname = full_names[i]
-                sn_short_name = short_names[i]
-                idx = sn_short_name.rfind("/")
-                subtype = sn_short_name[:idx]
-
-        int_obj = self.int_obj
-
-        sn_name = os.path.join(sne_dir(10), subtype, sn_best_fullname)
-        hg_name = os.path.join(gal_dir(10), hg_name)
-
-        nova = kill_header(sn_name)
-        nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
-
-        host = np.loadtxt(hg_name)
-        host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
-
-        # Interpolate supernova and host galaxy. As in _plot_best_fits, the
-        # law is evaluated at the template's rest wavelength so that this
-        # matches the model the fitter scored.
-        redshifted_nova = nova[:, 0] * (z + 1)
-        extinct_nova = (
-            nova[:, 1]
-            * 10 ** (-0.4 * extmag * Alam(nova[:, 0], R_v=parameters.R_v))
-            / (z + 1)
-        )
-
-        reshifted_host = host[:, 0] * (z + 1)
-        reshifted_hostf = host[:, 1] / (z + 1)
-
-        nova_int = interpolate.interp1d(
-            redshifted_nova, extinct_nova, bounds_error=False, fill_value="nan"
-        )
-        host_int = interpolate.interp1d(
-            reshifted_host, reshifted_hostf, bounds_error=False, fill_value="nan"
-        )
-        host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
-
-        sn_type = short_name[: short_name.find("/")]
-        hg_name = hg_name[hg_name.rfind("/") + 1 :]
-        subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
-        phase = str(short_name[short_name.rfind(":") + 1 : -1])
-        plt.figure(figsize=(8 * np.sqrt(2), 8))
-        plt.plot(parameters.lam, int_obj, "r", label="Input object: " + self.name)
-        plt.plot(
-            parameters.lam,
-            host_nova,
-            "g",
-            label="SN: "
-            + sn_type
-            + " - "
-            + subclass
-            + " - Phase: "
-            + phase
-            + "\nHost: "
-            + str(hg_name)
-            + "\nSN contrib: {0: .1f}%".format(100 * sn_cont),
-        )
-        plt.legend(framealpha=1, frameon=True, fontsize=12)
-        plt.ylabel("Flux arbitrary", fontsize=14)
-        plt.xlabel("Lamda", fontsize=14)
-        plt.title("Best fit for z = " + str(z), fontsize=15, fontweight="bold")
-
-        if parameters.show_plot_png:
-            plt.savefig(self.results_name + "_" + str(j) + ".png")
-        else:
-            plt.savefig(self.results_name + "_" + str(j) + ".pdf")
-
-        if parameters.show == 1:
-            plt.show()
+        return self.plot_rank(j)
 
     def convolution(self):
 

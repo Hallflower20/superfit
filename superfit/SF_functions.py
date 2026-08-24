@@ -9,11 +9,11 @@ import itertools
 import os
 from PyAstronomy import pyasl
 import multiprocessing as mp
+import threading
 from tqdm import tqdm
 
 from superfit.get_metadata import get_metadata
 from superfit.error_routines import savitzky_golay, linear_error
-from superfit.params import parameters
 from superfit.Header_Binnings import (
     bin_spectrum_bank,
     kill_header,
@@ -494,6 +494,9 @@ def _single_threaded_blas():
 # before the pool is created; under fork the children inherit it for free.
 _SHARED_STATE = None
 
+# Held for as long as _SHARED_STATE is published; see all_parameter_space.
+_FIT_LOCK = threading.Lock()
+
 
 def _init_worker(state):
     """Fallback for start methods that do not inherit memory (spawn)."""
@@ -652,13 +655,20 @@ def all_parameter_space(
 
     import time
 
-    metadata = get_metadata()
+    # Popped, not read: the rest of kwargs is forwarded to every worker, and
+    # the whole Parameters object -- template lists, grids -- has no business
+    # being pickled once per process.
+    parameters = kwargs.pop("parameters")
+    mask_galaxy_lines = parameters.mask_galaxy_lines
+    metadata = get_metadata(parameters)
 
     print("superfit started")
     #print(len(templates_sn_trunc))
     start = time.time()
 
-    save = kwargs["save"]
+    # The full path to write, not a prefix to concatenate onto: see
+    # superfit.output for why that distinction earned its own module.
+    results_path = os.fspath(kwargs["results_path"])
 
     templates_sn_trunc_dict = {}
     templates_gal_trunc_dict = {}
@@ -677,7 +687,7 @@ def all_parameter_space(
             full_name = a[a.find("sne") :]
             one_sn = os.path.join(binning_dir(resolution), full_name)
 
-            if parameters.mask_galaxy_lines == 1:
+            if mask_galaxy_lines:
                 one_sn = np.loadtxt(one_sn)
                 one_sn = mask_lines_bank(one_sn)
             else:
@@ -692,19 +702,14 @@ def all_parameter_space(
 
             templates_sn_trunc_dict[short_name] = one_sn
 
-    elif parameters.resolution != 30 or parameters.resolution != 10:
-
+    else:
+        # Any other resolution: bin the original-resolution bank on the fly.
         for i in range(0, len(all_bank_files)):
 
-            if parameters.mask_galaxy_lines == 1:
-
-                one_sn = kill_header(all_bank_files[i])
+            one_sn = kill_header(all_bank_files[i])
+            if mask_galaxy_lines:
                 one_sn = mask_lines_bank(one_sn)
-                one_sn = bin_spectrum_bank(one_sn, resolution)
-
-            elif parameters.mask_galaxy_lines == 0:
-                one_sn = kill_header(all_bank_files[i])
-                one_sn = bin_spectrum_bank(one_sn, resolution)
+            one_sn = bin_spectrum_bank(one_sn, resolution)
 
             idx = all_bank_files[i].rfind("/") + 1
             filename = all_bank_files[i][idx:]
@@ -758,37 +763,48 @@ def all_parameter_space(
     # here rather than once per grid point inside core().
     sigma = error_obj(kwargs["kind"], lam, kwargs["original"])
 
-    global _SHARED_STATE
-    _SHARED_STATE = {
-        "int_obj": int_obj,
-        "sn_names": sn_spec_files,
-        "gal_names": templates_gal_trunc,
-        "sn_bank": sn_bank,
-        "gal_bank": gal_bank,
-        "lam": lam,
-        "iterations": iterations,
-        "sigma": sigma,
-        "R_v": kwargs.get("R_v", 3.1),
-        "kwargs": kwargs,
-    }
-
     n_grid_points = len(redshift) * len(extconstant)
     n_workers = resolve_worker_count(kwargs.get("n_cores"), n_grid_points)
     params = build_tasks(redshift, extconstant, n_workers)
 
     fit_start = time.time()
 
-    if n_workers == 1:
-        # One grid point, or an explicit request for serial: skip the pool
-        # entirely rather than paying to fork for a single task.
-        results = [_fit_one_grid_point(p) for p in tqdm(params)]
-    else:
-        # Each worker's chi2 is a handful of small BLAS calls. Left to
-        # themselves they would each spin up a full thread pool, so N workers
-        # times N BLAS threads fight over the same cores. Forked children
-        # inherit this limit.
-        with _single_threaded_blas():
-            results = _run_pool(params, n_workers)
+    # _SHARED_STATE is how the bank reaches forked workers without being
+    # pickled per task, which means it is one variable for the whole process.
+    # Two threads calling this at once would publish over each other -- and
+    # forking a pool from several threads at once deadlocks besides -- so
+    # concurrent fits take turns here rather than corrupting each other. The
+    # work inside is already spread across every core, so nothing is lost.
+    global _SHARED_STATE
+
+    with _FIT_LOCK:
+        _SHARED_STATE = {
+            "int_obj": int_obj,
+            "sn_names": sn_spec_files,
+            "gal_names": templates_gal_trunc,
+            "sn_bank": sn_bank,
+            "gal_bank": gal_bank,
+            "lam": lam,
+            "iterations": iterations,
+            "sigma": sigma,
+            "R_v": kwargs.get("R_v", 3.1),
+            "kwargs": kwargs,
+        }
+
+        try:
+            if n_workers == 1:
+                # One grid point, or an explicit request for serial: skip the
+                # pool entirely rather than paying to fork for a single task.
+                results = [_fit_one_grid_point(p) for p in tqdm(params)]
+            else:
+                # Each worker's chi2 is a handful of small BLAS calls. Left to
+                # themselves they would each spin up a full thread pool, so N
+                # workers times N BLAS threads fight over the same cores.
+                # Forked children inherit this limit.
+                with _single_threaded_blas():
+                    results = _run_pool(params, n_workers)
+        finally:
+            _SHARED_STATE = None
 
     print(
         "Fitted {0} grid points ({1} redshifts x {2} A_v) as {3} task(s) on "
@@ -806,7 +822,7 @@ def all_parameter_space(
 
     result.sort("CHI2/dof2")
 
-    ascii.write(result, save + ".csv", format="csv", fast_writer=False, overwrite=True)
+    ascii.write(result, results_path, format="csv", fast_writer=False, overwrite=True)
 
     for message in grid_edge_warnings(result, redshift, extconstant):
         print("WARNING: " + message)

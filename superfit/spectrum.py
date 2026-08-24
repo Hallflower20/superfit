@@ -12,7 +12,7 @@ import os
 
 import numpy as np
 
-from superfit.Header_Binnings import bin_spectrum_bank, kill_header, normalise_flux
+from superfit.Header_Binnings import bin_spectrum_bank, normalise_flux
 from superfit.SF_functions import mask_host_lines, remove_telluric
 
 
@@ -87,30 +87,63 @@ class Spectrum:
         return cls(wavelength, flux, error=error, name=name)
 
     @classmethod
-    def from_file(cls, path, name=None):
-        """Read a two- or three-column ascii spectrum, or a .csv.
+    def from_file(cls, path, name=None, columns=None, wavelength_unit=None, hdu=None):
+        """Read a spectrum from an ascii, csv or FITS file.
 
-        Header lines are stripped. A ``.csv`` is expected to carry
-        ``wavelength``, ``flux`` and ``fluxerr`` columns.
+        Parameters
+        ----------
+        path : str
+            The file. Ascii columns are taken by position, csv and FITS
+            columns by name, and a FITS image by its wavelength WCS.
+        columns : sequence or mapping, optional
+            Which columns hold wavelength, flux and error -- by name or by
+            position. A mapping may name ``ivar`` instead of ``error``.
+        wavelength_unit : str, optional
+            ``nm``, ``micron``, ``log10(AA)``, and so on. Taken from the
+            file's own unit keywords when not given.
+        hdu : int or str, optional
+            Which FITS HDU to read.
+
+        See :mod:`superfit.io` for what is understood.
         """
 
-        data = kill_header(path)
+        from superfit.io import read_spectrum
 
-        error = data[:, 2] if data.shape[1] > 2 else None
+        wavelength, flux, error = read_spectrum(
+            path, columns=columns, wavelength_unit=wavelength_unit, hdu=hdu
+        )
+
         stem = os.path.basename(path)
+        for suffix in (".gz", ".fits", ".fit", ".fts", ".fz"):
+            if stem.lower().endswith(suffix):
+                stem = stem[: -len(suffix)]
         stem = stem[: stem.rfind(".")] if "." in stem else stem
 
-        return cls(data[:, 0], data[:, 1], error=error, name=name or stem)
+        return cls(wavelength, flux, error=error, name=name or stem)
 
     @classmethod
-    def coerce(cls, value, name=None):
-        """Accept a Spectrum, a path, or an (n, 2+) array and return a Spectrum."""
+    def coerce(cls, value, name=None, **reading):
+        """Accept a Spectrum, a path, or an (n, 2+) array and return a Spectrum.
+
+        ``**reading`` is passed to :meth:`from_file` when ``value`` is a
+        path, and must be empty otherwise -- silently ignoring
+        ``wavelength_unit`` for an array the caller already has in memory
+        would be the same class of bug this module exists to prevent.
+        """
+
+        if isinstance(value, (str, bytes, os.PathLike)):
+            return cls.from_file(os.fspath(value), name=name, **reading)
+
+        reading = {k: v for k, v in reading.items() if v is not None}
+        if reading:
+            raise TypeError(
+                "{} only apply to a spectrum read from a file.".format(
+                    ", ".join(sorted(reading))
+                )
+            )
 
         if isinstance(value, cls):
             return value if name is None else value.renamed(name)
-
-        if isinstance(value, (str, bytes, os.PathLike)):
-            return cls.from_file(os.fspath(value), name=name)
 
         array = np.asarray(value, dtype=float)
         if array.ndim != 2 or array.shape[1] < 2:
@@ -225,8 +258,19 @@ class Spectrum:
 
         from scipy import stats
 
+        from superfit.Header_Binnings import median_spacing, normalisation_scale
+
         lam = self.wavelength
         flux = self.flux
+
+        # A spectrum already sampled more coarsely than `resolution` is passed
+        # through by bin_spectrum_bank unbinned, divided only by its median.
+        # The error has to take the same branch: re-binning it here regardless
+        # produced one fewer point than the flux, and Spectrum rejected the
+        # pair. A three-column spectrum sampled at exactly the default 10 A --
+        # an entirely ordinary file -- could not be fitted at all.
+        if median_spacing(lam) >= resolution:
+            return self.error / normalisation_scale(flux)
 
         # Mirror bin_spectrum_bank so the two cannot drift apart.
         n_bins = math.floor((lam[-1] - lam[0]) / resolution)

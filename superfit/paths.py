@@ -12,6 +12,7 @@ documentation.
 """
 
 import os
+import sys
 
 # Environment overrides, newest name first. NGSF_BANK_DIR is the name this
 # used to have and is still honoured.
@@ -57,35 +58,66 @@ def _candidate_bank_dirs():
     yield os.path.join(os.getcwd(), "bank")
     yield os.path.join(REPO_DIR, "bank")
     yield os.path.join(PACKAGE_DIR, "bank")
+    # Where `superfit bank install` puts it. Last, so a bank sitting next to
+    # the spectra you are working on still wins -- but present, so a plain
+    # `pip install superfit && superfit bank install` needs no further setup.
+    yield _user_data_bank_dir()
+
+
+def _user_data_bank_dir():
+    """The per-user data directory ``superfit bank install`` writes to.
+
+    Duplicated from superfit.bank rather than imported: this module is the
+    one every other module depends on, and it must not start importing
+    things back.
+    """
+
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "superfit", "bank")
 
 
 def find_bank_dir(use_cache=True):
-    """Return the template bank directory, or raise with a useful message."""
+    """Return the template bank directory, or raise with a useful message.
 
-    global _cached_bank_dir
+    ``use_cache=False`` re-resolves without touching the cache. It used to
+    overwrite it, so merely *inspecting* the bank -- ``superfit bank status``,
+    ``superfit doctor`` -- silently discarded a directory the caller had
+    chosen with :func:`set_bank_dir`, and the next fit ran against a
+    different bank than the one just reported.
+    """
 
     if use_cache and _cached_bank_dir is not None:
         return _cached_bank_dir
 
+    def remember(path):
+        global _cached_bank_dir
+        path = os.path.abspath(path)
+        if use_cache:
+            _cached_bank_dir = path
+        return path
+
     override = _env_override()
     if override is not None:
-        _cached_bank_dir = os.path.abspath(override)
-        return _cached_bank_dir
+        return remember(override)
 
     tried = []
     for candidate in _candidate_bank_dirs():
         tried.append(candidate)
         if os.path.isdir(candidate):
-            _cached_bank_dir = os.path.abspath(candidate)
-            return _cached_bank_dir
+            return remember(candidate)
 
     raise FileNotFoundError(
         "Could not locate the superfit template bank. Looked in:\n  "
         + "\n  ".join(tried)
-        + "\n\nDownload it from "
+        + "\n\nInstall it with:\n\n    superfit bank install\n\n"
+        "or download it from "
         + BANK_URL
-        + "\nand unzip it into the working directory, or point "
-        "SUPERFIT_BANK_DIR at it."
+        + " and point SUPERFIT_BANK_DIR at it."
     )
 
 

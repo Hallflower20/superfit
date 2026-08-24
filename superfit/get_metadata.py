@@ -3,7 +3,7 @@ import numpy as np
 import os
 import pandas as pd
 import csv
-from superfit.params import get_parameters
+import threading
 from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
 
 
@@ -24,9 +24,7 @@ def list_folders(path):
 
 class Metadata(object):
 
-    def __init__(self):
-
-        parameters = get_parameters()
+    def __init__(self, parameters):
 
         mjd_max_brightness = MJD_MAX_BRIGHTNESS_CSV
 
@@ -136,21 +134,42 @@ class Metadata(object):
 
 
 _cached_metadata = None
-_cached_for = None
+_cached_key = None
+
+# Held across the check, the build and the store, so that the three cannot
+# be interleaved with another caller's. Returning the built object from a
+# local (below) already narrows the window to a single store instruction,
+# but "narrow" is not "closed", and a scan that hands back the wrong
+# template list is not the kind of bug worth leaving a window for. The lock
+# costs nothing: it is taken once per fit, around work that takes a second.
+_cache_lock = threading.Lock()
 
 
-def get_metadata():
-    """Return the bank metadata, scanning the bank at most once per config.
+def get_metadata(parameters):
+    """Return the bank metadata for ``parameters``, scanning the bank rarely.
 
     Building this walks every object directory and parses ~190 wiserep CSVs.
     It used to be done twice per run -- once in Superfit.__init__ and once in
     all_parameter_space -- for identical results.
+
+    The cache is keyed on what the scan actually reads (the SN types and the
+    epoch window), not on the identity of the Parameters object, so a second
+    fit that differs only in redshift reuses the first one's scan.
     """
 
-    global _cached_metadata, _cached_for
+    global _cached_metadata, _cached_key
 
-    params = get_parameters()
-    if _cached_metadata is None or _cached_for is not params:
-        _cached_metadata = Metadata()
-        _cached_for = params
-    return _cached_metadata
+    key = parameters.metadata_key
+
+    with _cache_lock:
+        if _cached_metadata is not None and _cached_key == key:
+            return _cached_metadata
+
+        # Built into a local and returned from the local. Returning the
+        # global instead could hand back whatever another caller had stored
+        # in between, and leave the cache holding one fit's metadata under
+        # another fit's key for the rest of the process.
+        metadata = Metadata(parameters)
+        _cached_metadata = metadata
+        _cached_key = key
+        return metadata
