@@ -104,6 +104,32 @@ class TestInputForms:
 
         assert_same_science(from_file, result)
 
+    def test_a_fits_file_matches_the_ascii_one(self, from_file, tmp_path):
+        """The same spectrum in FITS, in nm, with inverse variance instead of
+        an uncertainty -- three things a reader can get wrong -- must still
+        be the same fit."""
+
+        fits = pytest.importorskip("astropy.io.fits")
+
+        data = np.loadtxt(TEST_SPECTRUM)
+        columns = [
+            fits.Column(name="WAVE", format="D", unit="nm", array=data[:, 0] / 10.0),
+            fits.Column(name="FLUX", format="D", array=data[:, 1]),
+            fits.Column(
+                name="IVAR",
+                format="D",
+                array=1.0 / np.maximum(data[:, 2], 1e-30) ** 2,
+            ),
+        ]
+        path = tmp_path / "SN2021urb.fits"
+        fits.HDUList(
+            [fits.PrimaryHDU(), fits.BinTableHDU.from_columns(columns, name="SPEC")]
+        ).writeto(path)
+
+        from_fits = Superfit(str(path), output_dir=str(tmp_path), **FIT_KWARGS).run()
+
+        assert_same_science(from_file, from_fits)
+
     def test_one_spectrum_reused_for_several_redshifts(self, tmp_path):
         """Spectrum is immutable enough to fit repeatedly without reloading."""
 
@@ -289,13 +315,32 @@ class TestErrors:
             Superfit(wavelength=np.linspace(4000, 5000, 10))
 
     def test_included_errors_without_an_error_column(self, tmp_path):
+        """A file that really has two columns cannot supply its own errors."""
+
+        two_columns = np.loadtxt(TEST_SPECTRUM)[:, :2]
+        path = tmp_path / "two_columns.flm"
+        np.savetxt(path, two_columns)
+
         with pytest.raises(ValueError, match="needs an uncertainty column"):
             Superfit(
-                TEST_SPECTRUM,
+                str(path),
                 output_dir=str(tmp_path) + "/",
                 error_model="included",
                 **FIT_KWARGS
             ).run()
+
+    def test_a_third_column_in_the_file_is_the_error(self, tmp_path):
+        """The reader used to drop it, so `included` failed on files that had one."""
+
+        results = Superfit(
+            TEST_SPECTRUM,
+            output_dir=str(tmp_path),
+            error_model="included",
+            **FIT_KWARGS
+        ).run()
+
+        assert len(results) > 0
+        assert np.isfinite(results["CHI2/dof"]).all()
 
     def test_included_errors_work_when_supplied(self, tmp_path):
         data = np.loadtxt(TEST_SPECTRUM)

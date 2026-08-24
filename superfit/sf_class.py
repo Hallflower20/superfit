@@ -82,8 +82,21 @@ class Superfit:
         # filesystem happens to say about a path that was also wrong.
         merged = load_config(config, **overrides)
 
+        # How to read a spectrum given as a path: which columns, what unit
+        # the wavelengths are in, which FITS HDU. See superfit.io.
+        reading = {
+            "columns": merged["spectrum_columns"],
+            "wavelength_unit": merged["wavelength_unit"],
+            "hdu": merged["spectrum_hdu"],
+        }
+
         spectrum = self._resolve_spectrum(
-            spectrum, wavelength=wavelength, flux=flux, error=error, name=name
+            spectrum,
+            wavelength=wavelength,
+            flux=flux,
+            error=error,
+            name=name,
+            reading=reading,
         )
 
         if spectrum is None:
@@ -93,7 +106,7 @@ class Superfit:
                     "wavelength= and flux= arrays, or set 'object_to_fit' in "
                     "the configuration."
                 )
-            spectrum = Spectrum.from_file(merged["object_to_fit"])
+            spectrum = Spectrum.from_file(merged["object_to_fit"], name=name, **reading)
         elif not merged["object_to_fit"]:
             # Recorded in *_used.json so the run stays self-describing.
             merged["object_to_fit"] = spectrum.name
@@ -139,7 +152,7 @@ class Superfit:
         self._write_used_config()
 
     @staticmethod
-    def _resolve_spectrum(spectrum, wavelength, flux, error, name):
+    def _resolve_spectrum(spectrum, wavelength, flux, error, name, reading=None):
         """Turn whichever of the input forms was used into a Spectrum."""
 
         if wavelength is not None or flux is not None:
@@ -156,7 +169,7 @@ class Superfit:
         if spectrum is None:
             return None
 
-        return Spectrum.coerce(spectrum, name=name)
+        return Spectrum.coerce(spectrum, name=name, **(reading or {}))
 
     def _write_used_config(self):
         """Record the effective configuration next to the results."""

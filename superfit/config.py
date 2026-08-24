@@ -69,6 +69,12 @@ DEFAULT_CONFIG = {
     # --- what to fit -----------------------------------------------------
     # None means "the spectrum was supplied directly, not as a path".
     "object_to_fit": None,
+    # How to read it, when it is a path. All None means "work it out": ascii
+    # columns by position, csv and FITS columns by name, units from the
+    # file's own keywords. See superfit.io.
+    "spectrum_columns": None,
+    "wavelength_unit": None,
+    "spectrum_hdu": None,
     # --- redshift --------------------------------------------------------
     "use_exact_z": True,
     "z_exact": 0.0,

@@ -91,6 +91,24 @@ def _add_fit_parser(subparsers):
     )
     fit.add_argument("--name", help="Name for the spectrum; defaults to the filename.")
 
+    reading = fit.add_argument_group("reading the spectrum")
+    reading.add_argument(
+        "--columns",
+        metavar="W,F[,E]",
+        help="Which columns hold wavelength, flux and error. Names for csv "
+        "and FITS ('wave,flux,ivar'), positions for ascii ('0,1,3'). "
+        "Left out, they are identified from the file.",
+    )
+    reading.add_argument(
+        "--wavelength-unit",
+        metavar="UNIT",
+        help="Unit the wavelengths are in: AA, nm, micron, log10(AA). Left "
+        "out, taken from the file, and Angstroms assumed.",
+    )
+    reading.add_argument(
+        "--hdu", help="Which FITS HDU to read, by index or by name."
+    )
+
     redshift = fit.add_argument_group("redshift")
     redshift.add_argument(
         "--z", type=float, help="Fit at this exact redshift. The usual case."
@@ -313,6 +331,37 @@ def _needs_action(parser):
 # -- fit -------------------------------------------------------------------
 
 
+def _int_or_name(text):
+    """A FITS HDU is addressed by index or by name; the shell gives us text."""
+
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def parse_columns(text):
+    """``--columns wave,flux,ivar`` or ``--columns 0,1,3``.
+
+    Positions stay integers so the ascii reader takes them as positions;
+    anything else is a column name.
+    """
+
+    names = [part.strip() for part in text.split(",") if part.strip()]
+    if not 2 <= len(names) <= 3:
+        raise ValueError(
+            "--columns takes two or three comma-separated names or positions "
+            "(wavelength, flux, and optionally error), got {!r}.".format(text)
+        )
+
+    resolved = [_int_or_name(name) for name in names]
+
+    # `ivar` is inverse variance, not an uncertainty, and has to be converted.
+    if len(resolved) == 3 and str(resolved[2]).lower() in ("ivar", "invvar"):
+        return {"wavelength": resolved[0], "flux": resolved[1], "ivar": resolved[2]}
+    return resolved
+
+
 def fit_overrides(args):
     """Turn parsed ``fit`` arguments into configuration overrides.
 
@@ -346,6 +395,13 @@ def fit_overrides(args):
                 "--scan-z turns off host-line masking: the lines have no "
                 "single redshift to sit at."
             )
+
+    if args.columns:
+        overrides["spectrum_columns"] = parse_columns(args.columns)
+    if args.wavelength_unit:
+        overrides["wavelength_unit"] = args.wavelength_unit
+    if args.hdu is not None:
+        overrides["spectrum_hdu"] = _int_or_name(args.hdu)
 
     if args.resolution is not None:
         overrides["resolution"] = args.resolution
