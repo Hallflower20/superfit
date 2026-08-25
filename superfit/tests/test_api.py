@@ -293,9 +293,32 @@ class TestConfigForms:
 
         recorded = json.loads((result.directory / USED_CONFIG_JSON).read_text())
 
+        settings = {k: v for k, v in recorded.items() if not k.startswith("_")}
+
         # A three-keyword call must still record every effective setting.
-        assert set(recorded) == set(DEFAULT_CONFIG)
+        assert set(settings) == set(DEFAULT_CONFIG)
         assert recorded["z_exact"] == 0.127
+
+        # Alongside the settings, which bank was actually read. The name is a
+        # pointer that can be re-registered later; the resolved directory is
+        # what makes an old result checkable. Underscore-prefixed, so
+        # load_config strips them and the file still reads back as a config.
+        assert recorded["_bank_resolved_dir"]
+        assert recorded["_bank_phase_table"]
+
+    def test_the_used_config_still_loads_as_a_config(self, tmp_path):
+        """Provenance keys must not stop the file being reusable as input."""
+
+        from superfit.config import load_config
+        from superfit.output import USED_CONFIG_JSON
+
+        result = Superfit(TEST_SPECTRUM, output_dir=str(tmp_path), **FIT_KWARGS).run()
+        recorded = json.loads((result.directory / USED_CONFIG_JSON).read_text())
+
+        loaded = load_config(recorded)
+
+        assert loaded["z_exact"] == 0.127
+        assert not [k for k in loaded if str(k).startswith("_")]
 
 
 class TestOutput:

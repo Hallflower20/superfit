@@ -21,8 +21,9 @@ from superfit.Header_Binnings import (
     normalise_flux,
 )
 from superfit.loggrid import RedshiftableTemplates
+from superfit import packed as packed_module
 from superfit.packed import load_template
-from superfit.paths import binning_dir
+from superfit.paths import sne_dir
 
 np.seterr(divide="ignore", invalid="ignore")
 
@@ -395,8 +396,9 @@ def core(
         redchi2.append(rchi2)
 
         supernova_file = templates_sn_trunc[idx[1]]
-        host_galaxy_file = str(templates_gal_trunc[idx[0]])
-        host_galaxy_file = host_galaxy_file[host_galaxy_file.rfind("/") + 1 :]
+        # basename, not a search for the last "/": a Windows bank path
+        # separates with backslashes and would come through whole.
+        host_galaxy_file = os.path.basename(str(templates_gal_trunc[idx[0]]))
 
         bb = b[idx[0]][idx[1]]
         dd = d[idx[0]][idx[1]]
@@ -688,58 +690,61 @@ def all_parameter_space(
     # collected and reported together at the end.
     unreadable = []
 
+    # This fit's own bank. Everything below is resolved from it rather than
+    # from the process-wide one, which another Superfit's construction can
+    # have moved since this fit was set up.
+    bank_dir = parameters.bank_dir
+    sne_root = sne_dir(bank_dir=bank_dir)
+
+    # Revalidate any pack this process already has open, once, against the
+    # bank on disk. A long-lived process fitting many spectra must not keep
+    # reading a pack built before the bank changed under it.
+    packed_module.begin_fit()
+
     def read_sn(path, reader):
         try:
-            return load_template(path, reader)
+            return load_template(path, reader, bank_dir=bank_dir)
         except (OSError, ValueError) as exc:
             unreadable.append((path, "{}: {}".format(type(exc).__name__, exc)))
             return None
 
-    if resolution == 10 or resolution == 30:
+    # 10 A and 30 A are pre-binned in the bank; anything else is binned from
+    # the original resolution on the fly. Both walk the same list, so this is
+    # one loop with the reader chosen up front rather than two copies of it.
+    pre_binned = resolution in (10, 30)
+    if pre_binned:
+        binned_root = sne_dir(resolution, bank_dir=bank_dir)
 
-        for i in range(0, len(all_bank_files)):
-            a = all_bank_files[i]
+    for source_path in all_bank_files:
 
-            full_name = a[a.find("sne") :]
-            one_sn = read_sn(
-                os.path.join(binning_dir(resolution), full_name), "loadtxt"
-            )
-            if one_sn is None:
-                continue
-            if mask_galaxy_lines:
-                one_sn = mask_lines_bank(one_sn)
+        if pre_binned:
+            # relpath against the bank's own supernova root, not a search for
+            # the substring "sne" in the whole path: a bank living under, say,
+            # /home/snelling/ would have that search cut the path in the
+            # wrong place, and on Windows the separators are backslashes.
+            relative = os.path.relpath(source_path, sne_root)
+            one_sn = read_sn(os.path.join(binned_root, relative), "loadtxt")
+        else:
+            one_sn = read_sn(source_path, "kill_header")
 
-            idx = all_bank_files[i].rfind("/") + 1
-            filename = all_bank_files[i][idx:]
+        if one_sn is None:
+            continue
 
-            short_name = str(metadata.shorhand_dict[filename])
-
-            path_dict[short_name] = all_bank_files[i]
-
-            templates_sn_trunc_dict[short_name] = one_sn
-
-    else:
-        # Any other resolution: bin the original-resolution bank on the fly.
-        for i in range(0, len(all_bank_files)):
-
-            one_sn = read_sn(all_bank_files[i], "kill_header")
-            if one_sn is None:
-                continue
-            if mask_galaxy_lines:
-                one_sn = mask_lines_bank(one_sn)
+        if mask_galaxy_lines:
+            one_sn = mask_lines_bank(one_sn)
+        if not pre_binned:
             one_sn = bin_spectrum_bank(one_sn, resolution)
 
-            idx = all_bank_files[i].rfind("/") + 1
-            filename = all_bank_files[i][idx:]
+        short_name = str(metadata.shorhand_dict[os.path.basename(source_path)])
 
-            short_name = str(metadata.shorhand_dict[filename])
-
-            path_dict[short_name] = all_bank_files[i]
-            templates_sn_trunc_dict[short_name] = one_sn
+        path_dict[short_name] = source_path
+        templates_sn_trunc_dict[short_name] = one_sn
 
     for i in range(0, len(templates_gal_trunc)):
 
-        one_gal = load_template(templates_gal_trunc[i], "loadtxt")
+        one_gal = load_template(
+            templates_gal_trunc[i], "loadtxt", bank_dir=bank_dir
+        )
         one_gal = bin_spectrum_bank(one_gal, resolution)
         templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
 

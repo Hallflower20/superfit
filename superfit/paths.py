@@ -261,34 +261,47 @@ def bank_is_available():
     return True
 
 
-def original_resolution_dir():
-    return os.path.join(find_bank_dir(), "original_resolution")
+# Every helper below takes an optional ``bank_dir``, and a fit always passes
+# its own. Falling back to the process-wide search is for interactive use and
+# for the command line, where there is only one bank in play.
+#
+# A fit must not read that global. Two Superfits with different banks exist
+# at once often enough -- a batch loop, a notebook, a comparison between two
+# banks -- and a bank pinned process-wide is one that the *next* constructor
+# moves out from under the fit already holding it. That fit then reads one
+# bank's supernovae against another's galaxies and reports the name it was
+# told, which is worse than either bank alone. The fit lock does not help:
+# the bank is chosen during construction, outside it.
 
 
-def binnings_dir():
-    return os.path.join(find_bank_dir(), "binnings")
+def original_resolution_dir(bank_dir=None):
+    return os.path.join(bank_dir or find_bank_dir(), "original_resolution")
 
 
-def binning_dir(resolution):
+def binnings_dir(bank_dir=None):
+    return os.path.join(bank_dir or find_bank_dir(), "binnings")
+
+
+def binning_dir(resolution, bank_dir=None):
     """Directory holding the bank pre-binned to ``resolution`` Angstroms."""
 
-    return os.path.join(binnings_dir(), "{}A".format(resolution))
+    return os.path.join(binnings_dir(bank_dir), "{}A".format(resolution))
 
 
-def sne_dir(resolution=None):
+def sne_dir(resolution=None, bank_dir=None):
     """Supernova template directory, binned or at original resolution."""
 
     if resolution is None:
-        return os.path.join(original_resolution_dir(), "sne")
-    return os.path.join(binning_dir(resolution), "sne")
+        return os.path.join(original_resolution_dir(bank_dir), "sne")
+    return os.path.join(binning_dir(resolution, bank_dir), "sne")
 
 
-def gal_dir(resolution=None):
+def gal_dir(resolution=None, bank_dir=None):
     """Host galaxy template directory, binned or at original resolution."""
 
     if resolution is None:
-        return os.path.join(original_resolution_dir(), "gal")
-    return os.path.join(binning_dir(resolution), "gal")
+        return os.path.join(original_resolution_dir(bank_dir), "gal")
+    return os.path.join(binning_dir(resolution, bank_dir), "gal")
 
 
 # Module-level constants stay readable as attributes (paths.BANK_DIR), but

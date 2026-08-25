@@ -164,6 +164,97 @@ class TestSelection:
             paths.find_bank_dir(name="modern")
 
 
+class TestBankIsPerFitNotPerProcess:
+    """Constructing a second fit must not move the first one's bank.
+
+    `a = Superfit(bank="legacy"); b = Superfit(bank="modern"); a.run()` used to
+    fit `a` against modern's supernovae and legacy's galaxies, and label the
+    result "legacy". Bank selection happens during construction, so the fit
+    lock does not help; the only fix is for nothing about a fit to be read
+    from process-wide state.
+    """
+
+    def test_resolving_a_named_bank_does_not_move_the_process_bank(
+        self, home, monkeypatch
+    ):
+        make_bank(home / "searched")
+        named = make_bank(home / "named")
+        bank.register("modern", named)
+        monkeypatch.setenv("SUPERFIT_BANK_DIR", str(home / "searched"))
+
+        before = paths.find_bank_dir(use_cache=False)
+        paths.find_bank_dir(name="modern")
+
+        assert paths.find_bank_dir(use_cache=False) == before
+
+    def test_two_parameters_keep_their_own_banks(self, home, monkeypatch):
+        from superfit.params import Parameters
+
+        legacy = make_bank(home / "legacy_bank", phase_table=PHASE_TABLE)
+        modern = make_bank(home / "modern_bank", phase_table=PHASE_TABLE)
+        bank.register("legacy-test", legacy)
+        bank.register("modern-test", modern)
+
+        base = dict(
+            object_to_fit="", lower_lam=4000, upper_lam=5000, resolution=10,
+            mask_galaxy_lines=False,
+        )
+
+        a = Parameters(dict(base, bank="legacy-test"))
+        b = Parameters(dict(base, bank="modern-test"))
+
+        # a's identity must be unchanged by b having been built afterwards.
+        assert a.bank_dir == str(legacy.resolve())
+        assert b.bank_dir == str(modern.resolve())
+        assert a.phase_table.startswith(a.bank_dir)
+        assert b.phase_table.startswith(b.bank_dir)
+
+    def test_the_metadata_cache_key_follows_the_fit_not_the_process(
+        self, home, monkeypatch
+    ):
+        """Two banks must not share a cached scan."""
+
+        from superfit.params import Parameters
+
+        legacy = make_bank(home / "legacy_bank")
+        modern = make_bank(home / "modern_bank")
+        bank.register("legacy-test", legacy)
+        bank.register("modern-test", modern)
+
+        base = dict(
+            object_to_fit="", lower_lam=4000, upper_lam=5000, resolution=10,
+            mask_galaxy_lines=False,
+        )
+
+        a = Parameters(dict(base, bank="legacy-test"))
+        b = Parameters(dict(base, bank="modern-test"))
+
+        assert a.metadata_key != b.metadata_key
+        assert a.metadata_key[0] == a.bank_dir
+
+    def test_template_lists_come_from_the_named_bank(self, home):
+        from superfit.params import Parameters
+
+        legacy = make_bank(home / "legacy_bank")
+        modern = make_bank(home / "modern_bank")
+        # Give modern a second galaxy so the two are distinguishable.
+        (modern / "binnings" / "10A" / "gal" / "Sa").write_text(TEMPLATE)
+        bank.register("legacy-test", legacy)
+        bank.register("modern-test", modern)
+
+        base = dict(
+            object_to_fit="", lower_lam=4000, upper_lam=5000, resolution=10,
+            mask_galaxy_lines=False, temp_gal_tr=["E", "Sa"],
+        )
+
+        a = Parameters(dict(base, bank="legacy-test"))
+        b = Parameters(dict(base, bank="modern-test"))
+
+        assert len(a.templates_gal_trunc) == 1
+        assert len(b.templates_gal_trunc) == 2
+        assert all(str(legacy) in str(p) for p in a.templates_gal_trunc)
+
+
 class TestPhaseTable:
     def test_a_banks_own_table_is_preferred(self, home):
         directory = make_bank(home / "b", phase_table=PHASE_TABLE)
