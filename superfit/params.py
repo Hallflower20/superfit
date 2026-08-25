@@ -188,6 +188,10 @@ class Parameters:
         # grid points regardless.
         self.n_cores = data.get("n_cores", 0)
 
+        # See config.DEFAULT_CONFIG; superfit.Session turns this off after the
+        # first fit of a batch.
+        self.revalidate_bank = bool(data.get("revalidate_bank", True))
+
         # Solve for the SN/galaxy amplitudes using the same 1/sigma**2 weights
         # the chi2 uses. Off by default: it is the statistically consistent
         # choice, but it shifts every chi2 and can change the best-fit

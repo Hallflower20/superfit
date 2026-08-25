@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -81,6 +82,10 @@ class Superfit:
         name=None,
         **overrides
     ):
+        # Stamped first so the timing reported at the end of run() covers
+        # reading the spectrum and scanning the bank, not just the fit.
+        self._constructed_at = time.time()
+
         # `Superfit(config_dict)` and `Superfit("parameters.json")` predate
         # the spectrum argument and still mean the config.
         if config is None and _looks_like_config(spectrum):
@@ -354,6 +359,14 @@ class Superfit:
 
         parameters = self.parameters
 
+        # From here to the last plot. The number this used to report started
+        # after the constructor had already read and binned the spectrum,
+        # scanned the bank metadata and built the run directory, and stopped
+        # before anything was plotted -- so it described a part of the work
+        # rather than the wait. `constructed_at` is stamped in __init__, so
+        # the total below covers that too.
+        run_start = time.time()
+
         print(
             "Running optimization for spectrum: {0} with resolution = {1} Å".format(
                 self.name_no_extension, parameters.resolution
@@ -385,6 +398,7 @@ class Superfit:
             show=parameters.show,
             minimum_overlap=parameters.minimum_overlap,
             n_cores=parameters.n_cores,
+            revalidate_bank=parameters.revalidate_bank,
             observed_grid=parameters.observed_grid,
             weighted_solve=parameters.weighted_solve,
             R_v=parameters.R_v,
@@ -394,7 +408,20 @@ class Superfit:
         self.results = pd.read_csv(self.results_path)
         self._artifacts.append(self.results_path)
 
+        plot_start = time.time()
         self._plot_best_fits()
+        plotting = time.time() - plot_start
+
+        now = time.time()
+        print(
+            "Total: {0: .2f}s  (setup {1: .2f}s, fit and write {2: .2f}s, "
+            "plots {3: .2f}s)".format(
+                now - self._constructed_at,
+                run_start - self._constructed_at,
+                now - run_start - plotting,
+                plotting,
+            )
+        )
 
         self.result = FitResult(self.results, self.output, self._artifacts)
         return self.result

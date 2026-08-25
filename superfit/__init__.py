@@ -18,6 +18,15 @@ or from a file::
     spectrum = Spectrum.from_file("SN2021urb.flm")
     results = Superfit(spectrum, z=0.127).run()
 
+For many spectra in one process, a ``Session`` prepares the bank once instead
+of once per fit::
+
+    from superfit import Session
+
+    with Session(bank="modern-curated", lower_lam=3500, upper_lam=9000) as s:
+        for path in paths:
+            print(s.fit(path, z=0.1).results.iloc[0]["SN"])
+
 Everything else -- the template lists, the A_v grid, the error model -- has a
 default, and any of it can be overridden by passing ``config=`` a dict or by
 keyword. See ``superfit.config.DEFAULT_CONFIG``.
@@ -29,6 +38,7 @@ __all__ = [
     "DEFAULT_CONFIG",
     "FitResult",
     "OutputExistsError",
+    "Session",
     "Spectrum",
     "Superfit",
     "__version__",
@@ -42,6 +52,7 @@ __all__ = [
 # is the version number.
 _LAZY = {
     "Superfit": ("superfit.sf_class", "Superfit"),
+    "Session": ("superfit.session", "Session"),
     "Spectrum": ("superfit.spectrum", "Spectrum"),
     "FitResult": ("superfit.output", "FitResult"),
     "OutputExistsError": ("superfit.output", "OutputExistsError"),

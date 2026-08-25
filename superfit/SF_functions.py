@@ -7,6 +7,7 @@ from astropy.io import ascii
 import contextlib
 import itertools
 import os
+import time
 from PyAstronomy import pyasl
 import multiprocessing as mp
 import threading
@@ -822,6 +823,264 @@ def resolve_worker_count(requested, n_tasks):
 
     return max(1, min(int(requested), n_tasks))
 
+# Prepared banks this process has built, keyed by everything they depend on.
+# One entry is the whole resampled bank -- 90 MB for the largest -- so this is
+# deliberately a single slot rather than an unbounded cache: a batch fits the
+# same bank over and over, and holding two of them costs more than rebuilding
+# the one that was displaced.
+_prepared = {}
+_prepared_key = None
+
+
+def forget_prepared_bank():
+    """Drop the prepared bank this process is holding.
+
+    For tests, and for a Session that has finished: the largest catalogue's
+    resampled templates are around 90 MB.
+    """
+
+    global _prepared_key
+
+    _prepared.clear()
+    _prepared_key = None
+
+
+def bank_state_token(bank_dir, revalidate):
+    """A token that changes when the bank's contents change.
+
+    Part of the prepared-bank key, and the reason a fit that reuses a prepared
+    bank still notices an edited one. Without it the cache would answer from
+    the first fit forever: the revalidation lives inside the loading, and a
+    cache hit skips the loading, so the check would be skipped exactly when it
+    was most needed.
+
+    Revalidating costs the directory listing that validates each pack -- one,
+    not one per template. ``revalidate=False`` returns a constant instead,
+    which is a caller stating that it has pinned the bank; see Session.
+    """
+
+    if not revalidate:
+        return "pinned"
+
+    fingerprints = []
+    try:
+        directories = packed_module.packable_directories(bank_dir)
+    except OSError:
+        return "unknown"
+
+    for relative in directories:
+        pack = packed_module.open_pack(bank_dir, relative)
+        fingerprints.append((relative, pack.fingerprint if pack else None))
+
+    return tuple(fingerprints)
+
+
+def prepared_bank_key(parameters, metadata, observed_grid, max_z, bank_state):
+    """Everything a prepared bank depends on.
+
+    The templates that go in depend on the bank -- its contents, by way of
+    ``bank_state`` -- the binning, whether host lines are masked, and which
+    objects the metadata scan selected. The resampling on top of that depends
+    on the observed grid and on the largest redshift the grid has to reach.
+    Nothing else, so two spectra sharing a wavelength range share the whole
+    preparation, and two that do not share only the loading.
+    """
+
+    return (
+        parameters.bank_dir,
+        bank_state,
+        parameters.resolution,
+        bool(parameters.mask_galaxy_lines),
+        parameters.metadata_key,
+        len(metadata.dictionary_all_trunc_objects),
+        tuple(str(x) for x in parameters.templates_gal_trunc),
+        observed_grid.identity,
+        round(float(max_z), 12),
+    )
+
+
+def prepare_bank(
+    parameters,
+    metadata,
+    observed_grid,
+    max_z,
+    templates_gal_trunc,
+    resolution,
+    mask_galaxy_lines,
+    revalidate_bank=True,
+    quiet=False,
+):
+    """Load the bank and resample it onto a log grid, or reuse the last one.
+
+    This is the expensive half of a fit that has nothing to do with the
+    spectrum: on the largest bank it is a directory listing to validate the
+    pack, 12316 template reads, host-line masking and the resample -- about
+    2.6 s warm, and considerably more when the filesystem is cold. A batch of
+    spectra on a common grid repeats all of it per spectrum unless it is kept,
+    which is what Session exists to do.
+
+    Returns ``(sn_bank, gal_bank, sn_names, unreadable)``.
+    """
+
+    global _prepared_key
+
+    # Before the cache is consulted, not after: the bank's state is part of
+    # the key, so a bank edited between two fits misses the cache rather than
+    # being answered from it.
+    packed_module.begin_fit(revalidate=revalidate_bank)
+    key = prepared_bank_key(
+        parameters,
+        metadata,
+        observed_grid,
+        max_z,
+        bank_state_token(parameters.bank_dir, revalidate_bank),
+    )
+
+    if _prepared_key == key and "bank" in _prepared:
+        if not quiet:
+            print("Reusing the prepared bank from the previous fit")
+        return _prepared["bank"]
+
+    load_start = time.time()
+
+    templates_sn_trunc_dict = {}
+    templates_gal_trunc_dict = {}
+    sn_spec_files = [str(x) for x in metadata.shorhand_dict.values()]
+    path_dict = {}
+
+    all_bank_files = [str(x) for x in metadata.dictionary_all_trunc_objects.values()]
+
+    #print(len(all_bank_files))
+
+    # Templates the bank lists but cannot supply. One bank's metadata names
+    # eight spectra that are not on disk, and another has a hundred-odd whose
+    # flux column carries the literal string "None" -- and a single one of
+    # them used to end a 15000-template fit with a traceback from inside
+    # np.loadtxt. A template that will not load is one template missing from
+    # the comparison, not a reason to throw the other 15000 away, so they are
+    # collected and reported together at the end.
+    unreadable = []
+
+    # This fit's own bank. Everything below is resolved from it rather than
+    # from the process-wide one, which another Superfit's construction can
+    # have moved since this fit was set up.
+    bank_dir = parameters.bank_dir
+    sne_root = sne_dir(bank_dir=bank_dir)
+
+    # 10 A and 30 A are pre-binned in the bank; anything else is binned from
+    # the original resolution on the fly. Both walk the same list, so this is
+    # one pass with the reader chosen up front rather than two copies of it.
+    pre_binned = resolution in (10, 30)
+
+    if pre_binned:
+        binned_root = sne_dir(resolution, bank_dir=bank_dir)
+        # relpath against the bank's own supernova root, not a search for the
+        # substring "sne" in the whole path: a bank living under, say,
+        # /home/snelling/ would have that search cut the path in the wrong
+        # place, and on Windows the separators are backslashes.
+        read_from = [
+            os.path.join(binned_root, os.path.relpath(source, sne_root))
+            for source in all_bank_files
+        ]
+        reader = "loadtxt"
+    else:
+        read_from = list(all_bank_files)
+        reader = "kill_header"
+
+    # One bulk read: the pack that covers these is resolved once for the whole
+    # batch rather than re-resolved per template.
+    source_of = dict(zip(read_from, all_bank_files))
+
+    for path, one_sn, error in packed_module.load_templates(
+        read_from, reader, bank_dir=bank_dir
+    ):
+        if error is not None:
+            unreadable.append((path, "{}: {}".format(type(error).__name__, error)))
+            continue
+
+        if mask_galaxy_lines:
+            one_sn = mask_lines_bank(one_sn)
+        if not pre_binned:
+            one_sn = bin_spectrum_bank(one_sn, resolution)
+
+        source_path = source_of[path]
+        short_name = str(metadata.shorhand_dict[os.path.basename(source_path)])
+
+        path_dict[short_name] = source_path
+        templates_sn_trunc_dict[short_name] = one_sn
+
+    for i in range(0, len(templates_gal_trunc)):
+
+        one_gal = load_template(
+            templates_gal_trunc[i], "loadtxt", bank_dir=bank_dir
+        )
+        one_gal = bin_spectrum_bank(one_gal, resolution)
+        templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
+
+    sn_spec_files = [x for x in path_dict.keys()]
+
+    if unreadable:
+        # Loud, and with examples: a bank quietly fitting against fewer
+        # templates than it advertises is a result nobody can reproduce.
+        print(
+            "WARNING: {0} of {1} supernova templates could not be read and "
+            "were left out of this fit. The bank lists them but cannot "
+            "supply them; the classification below is against the remaining "
+            "{2}.".format(
+                len(unreadable), len(all_bank_files), len(sn_spec_files)
+            )
+        )
+        for path, why in unreadable[:3]:
+            print("    {0}: {1}".format(path, why))
+        if len(unreadable) > 3:
+            print("    ... and {0} more".format(len(unreadable) - 3))
+
+    if not sn_spec_files:
+        raise RuntimeError(
+            "None of the {0} supernova templates this bank lists could be "
+            "read, so there is nothing to fit against. The first failure was "
+            "{1}".format(
+                len(all_bank_files),
+                unreadable[0][1] if unreadable else "not recorded",
+            )
+        )
+
+    print(
+        "Loaded {0} SN and {1} galaxy templates in {2: .1f}s".format(
+            len(sn_spec_files), len(templates_gal_trunc_dict),
+            time.time() - load_start,
+        )
+    )
+
+    # Resample the whole bank onto a rest-frame log grid aligned with the
+    # observed one. From here a redshift is a shift, so this is the only time
+    # anything is interpolated.
+    bank_start = time.time()
+    sn_bank = RedshiftableTemplates.from_templates(
+        [templates_sn_trunc_dict[name][:, 0] for name in sn_spec_files],
+        [templates_sn_trunc_dict[name][:, 1] for name in sn_spec_files],
+        observed_grid,
+        max_z,
+    )
+    gal_bank = RedshiftableTemplates.from_templates(
+        [templates_gal_trunc_dict[name][:, 0] for name in templates_gal_trunc],
+        [templates_gal_trunc_dict[name][:, 1] for name in templates_gal_trunc],
+        observed_grid,
+        max_z,
+    )
+    print(
+        "Resampled onto a {0:.0f} km/s log grid ({1} bins) in {2: .1f}s".format(
+            observed_grid.velocity_resolution, len(observed_grid),
+            time.time() - bank_start,
+        )
+    )
+
+
+    _prepared["bank"] = (sn_bank, gal_bank, sn_spec_files, unreadable)
+    _prepared_key = key
+    return _prepared["bank"]
+
+
 def all_parameter_space(
     int_obj,
     redshift,
@@ -875,7 +1134,6 @@ def all_parameter_space(
 
     """
 
-    import time
 
     # Popped, not read: the rest of kwargs is forwarded to every worker, and
     # the whole Parameters object -- template lists, grids -- has no business
@@ -892,140 +1150,15 @@ def all_parameter_space(
     # superfit.output for why that distinction earned its own module.
     results_path = os.fspath(kwargs["results_path"])
 
-    templates_sn_trunc_dict = {}
-    templates_gal_trunc_dict = {}
-    sn_spec_files = [str(x) for x in metadata.shorhand_dict.values()]
-    path_dict = {}
-
-    all_bank_files = [str(x) for x in metadata.dictionary_all_trunc_objects.values()]
-
-    #print(len(all_bank_files))
-
-    # Templates the bank lists but cannot supply. One bank's metadata names
-    # eight spectra that are not on disk, and another has a hundred-odd whose
-    # flux column carries the literal string "None" -- and a single one of
-    # them used to end a 15000-template fit with a traceback from inside
-    # np.loadtxt. A template that will not load is one template missing from
-    # the comparison, not a reason to throw the other 15000 away, so they are
-    # collected and reported together at the end.
-    unreadable = []
-
-    # This fit's own bank. Everything below is resolved from it rather than
-    # from the process-wide one, which another Superfit's construction can
-    # have moved since this fit was set up.
-    bank_dir = parameters.bank_dir
-    sne_root = sne_dir(bank_dir=bank_dir)
-
-    # Revalidate any pack this process already has open, once, against the
-    # bank on disk. A long-lived process fitting many spectra must not keep
-    # reading a pack built before the bank changed under it.
-    packed_module.begin_fit()
-
-    def read_sn(path, reader):
-        try:
-            return load_template(path, reader, bank_dir=bank_dir)
-        except (OSError, ValueError) as exc:
-            unreadable.append((path, "{}: {}".format(type(exc).__name__, exc)))
-            return None
-
-    # 10 A and 30 A are pre-binned in the bank; anything else is binned from
-    # the original resolution on the fly. Both walk the same list, so this is
-    # one loop with the reader chosen up front rather than two copies of it.
-    pre_binned = resolution in (10, 30)
-    if pre_binned:
-        binned_root = sne_dir(resolution, bank_dir=bank_dir)
-
-    for source_path in all_bank_files:
-
-        if pre_binned:
-            # relpath against the bank's own supernova root, not a search for
-            # the substring "sne" in the whole path: a bank living under, say,
-            # /home/snelling/ would have that search cut the path in the
-            # wrong place, and on Windows the separators are backslashes.
-            relative = os.path.relpath(source_path, sne_root)
-            one_sn = read_sn(os.path.join(binned_root, relative), "loadtxt")
-        else:
-            one_sn = read_sn(source_path, "kill_header")
-
-        if one_sn is None:
-            continue
-
-        if mask_galaxy_lines:
-            one_sn = mask_lines_bank(one_sn)
-        if not pre_binned:
-            one_sn = bin_spectrum_bank(one_sn, resolution)
-
-        short_name = str(metadata.shorhand_dict[os.path.basename(source_path)])
-
-        path_dict[short_name] = source_path
-        templates_sn_trunc_dict[short_name] = one_sn
-
-    for i in range(0, len(templates_gal_trunc)):
-
-        one_gal = load_template(
-            templates_gal_trunc[i], "loadtxt", bank_dir=bank_dir
-        )
-        one_gal = bin_spectrum_bank(one_gal, resolution)
-        templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
-
-    sn_spec_files = [x for x in path_dict.keys()]
-
-    if unreadable:
-        # Loud, and with examples: a bank quietly fitting against fewer
-        # templates than it advertises is a result nobody can reproduce.
-        print(
-            "WARNING: {0} of {1} supernova templates could not be read and "
-            "were left out of this fit. The bank lists them but cannot "
-            "supply them; the classification below is against the remaining "
-            "{2}.".format(
-                len(unreadable), len(all_bank_files), len(sn_spec_files)
-            )
-        )
-        for path, why in unreadable[:3]:
-            print("    {0}: {1}".format(path, why))
-        if len(unreadable) > 3:
-            print("    ... and {0} more".format(len(unreadable) - 3))
-
-    if not sn_spec_files:
-        raise RuntimeError(
-            "None of the {0} supernova templates this bank lists could be "
-            "read, so there is nothing to fit against. The first failure was "
-            "{1}".format(
-                len(all_bank_files),
-                unreadable[0][1] if unreadable else "not recorded",
-            )
-        )
-
-    print(
-        "Loaded {0} SN and {1} galaxy templates in {2: .1f}s".format(
-            len(sn_spec_files), len(templates_gal_trunc_dict), time.time() - start
-        )
-    )
-
-    # Resample the whole bank onto a rest-frame log grid aligned with the
-    # observed one. From here a redshift is a shift, so this is the only time
-    # anything is interpolated.
-    observed_grid = kwargs["observed_grid"]
-    max_z = float(np.max(redshift))
-
-    bank_start = time.time()
-    sn_bank = RedshiftableTemplates.from_templates(
-        [templates_sn_trunc_dict[name][:, 0] for name in sn_spec_files],
-        [templates_sn_trunc_dict[name][:, 1] for name in sn_spec_files],
-        observed_grid,
-        max_z,
-    )
-    gal_bank = RedshiftableTemplates.from_templates(
-        [templates_gal_trunc_dict[name][:, 0] for name in templates_gal_trunc],
-        [templates_gal_trunc_dict[name][:, 1] for name in templates_gal_trunc],
-        observed_grid,
-        max_z,
-    )
-    print(
-        "Resampled onto a {0:.0f} km/s log grid ({1} bins) in {2: .1f}s".format(
-            observed_grid.velocity_resolution, len(observed_grid),
-            time.time() - bank_start,
-        )
+    sn_bank, gal_bank, sn_spec_files, unreadable = prepare_bank(
+        parameters,
+        metadata,
+        kwargs["observed_grid"],
+        float(np.max(redshift)),
+        templates_gal_trunc,
+        resolution,
+        mask_galaxy_lines,
+        revalidate_bank=kwargs.get("revalidate_bank", True),
     )
 
     # The error spectrum depends only on the observed object, so derive it once
@@ -1115,8 +1248,7 @@ def all_parameter_space(
     for message in grid_edge_warnings(result, redshift, extconstant):
         print("WARNING: " + message)
 
-    end = time.time()
-    print("Runtime: {0: .2f}s ".format(end - start))
+    print("Fit and write: {0: .2f}s ".format(time.time() - start))
 
     return
 

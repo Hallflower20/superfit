@@ -88,6 +88,18 @@ class LogGrid:
         return cls(np.log(lower), dlnlam, n)
 
     @property
+    def identity(self):
+        """The three numbers that define this grid, as a hashable tuple.
+
+        Two grids with the same identity produce the same wavelengths, so
+        anything resampled onto one can be reused for the other. Rounded, so
+        that a grid rebuilt from the same bounds compares equal rather than
+        differing in the last bit of a logarithm.
+        """
+
+        return (round(self.ln_start, 12), round(self.dlnlam, 15), self.n_points)
+
+    @property
     def ln_wavelength(self):
         return self.ln_start + self.dlnlam * np.arange(self.n_points)
 
