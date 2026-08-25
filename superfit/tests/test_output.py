@@ -5,6 +5,8 @@ one survives, so they are tested without the template bank -- they have to
 hold for every fit, and nobody should have to download 74 MB to find out.
 """
 
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -137,6 +139,12 @@ class TestRunDirectory:
         assert notes.read_text() == "mine"
         assert (run.path / "subdir").is_dir()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.chmod only toggles the read-only attribute on Windows and "
+        "does not make a directory unwritable, so there is no permissions "
+        "error to provoke",
+    )
     def test_an_unwritable_location_is_not_reported_as_a_collision(self, tmp_path):
         """--overwrite cannot help with a permissions problem, so do not
         send the caller after it."""
