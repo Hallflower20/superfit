@@ -248,9 +248,46 @@ bank is packed once for everyone, and in the per-user data directory when it
 is not. It stores the raw float64 each template parses to and nothing derived
 from it, so results are bit-identical either way, and no fit setting — the
 epoch window, the template selection, `mask_galaxy_lines` — can make it stale.
-Only the bank can, and a pack whose directory listing no longer matches is
-ignored in favour of the text. Packing is entirely optional: without it,
+Only the bank can.
+
+**When a pack is ignored.** Every fit re-lists the bank and compares names,
+sizes and modification times against what was recorded. Anything that does not
+match — an edited template, an added one, a removed one — and that directory
+falls back to reading the text. So do a corrupt or truncated array, an index
+that disagrees with itself or with its array, a pack built by a different
+reader, and a pack in an older format. The pack is an optimisation, so a broken
+one costs time and never an answer. Packing is entirely optional: without it,
 fits read the text files exactly as before.
+
+**Copying a bank invalidates its pack**, because copying resets modification
+times. Run `superfit bank pack` after moving or rsyncing one.
+
+### `superfit bank verify`
+
+Prove a pack still describes the bank's text.
+
+```bash
+$ superfit bank verify --bank modern-curated
+  [ok  ] binnings/10A/sne             matches the text
+  [ok  ] binnings/10A/gal             matches the text
+  ...
+```
+
+The per-fit check compares names, sizes and timestamps, which is cheap enough
+to run at every fit boundary. What it cannot catch is an edit landing inside
+the filesystem's timestamp granularity of the pack being built — `/tmp`
+resolves `mtime` to about 8 ms, so two writes in one tick share a timestamp.
+`verify` closes that by rehashing every template against a digest recorded when
+the bank was packed. It costs a full read of the bank, which is exactly what
+the pack exists to avoid, so it is a command you run rather than something a
+fit does. Exits non-zero if any pack no longer matches.
+
+| Flag | Meaning |
+| --- | --- |
+| `--bank NAME` | Verify the bank with this name. |
+| `--dir PATH` | Verify this directory. |
+| `--jobs N` | Processes to read with. |
+| `--quiet` | No progress bars. |
 
 ### `superfit bank status`
 
