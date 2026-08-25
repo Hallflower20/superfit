@@ -4,11 +4,29 @@ import os
 import pandas as pd
 import csv
 import threading
-from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, sne_dir
+from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, mjd_max_brightness_csv, sne_dir
 
 
 def JD(mjd):
     return float(mjd) + 2400000.5
+
+
+def _as_float(value):
+    """``value`` as a float, or None if it is not one.
+
+    Phase arithmetic needs a real number at both ends. A blank cell, a NaN,
+    a stray word in a hand-edited table: all of them mean the same thing here
+    -- there is no epoch to measure from -- and all of them used to raise or,
+    worse, propagate NaN into a comparison that silently comes out False.
+    """
+
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if np.isnan(number) else number
 
 def list_folders(path):
     if path[-1] != '/':
@@ -26,7 +44,13 @@ class Metadata(object):
 
     def __init__(self, parameters):
 
-        mjd_max_brightness = MJD_MAX_BRIGHTNESS_CSV
+        # The bank's own phase table when it carries one. A bank built
+        # somewhere else knows its own objects; the copy inside the package
+        # only knows the 189 the legacy bank was built from. Resolved here
+        # rather than imported at module load so that selecting a bank
+        # selects its phase table with it -- which callers used to have to
+        # arrange by assigning over this module's globals.
+        mjd_max_brightness = mjd_max_brightness_csv()
 
 
 
@@ -73,6 +97,17 @@ class Metadata(object):
                     # astropy.io.ascii, which was the single largest cost in
                     # building the metadata.
                     wise=pd.read_csv(subpath+'/wiserep_spectra.csv')
+
+                    # A header with no rows is a bank saying "no spectra
+                    # survived curation for this object", which is a
+                    # statement, not a fault. Reading .iloc[0] off it raised
+                    # IndexError and took the whole fit down; one bank has 51
+                    # such objects. Treated as an object with no metadata,
+                    # which is what the else-branch below already handles.
+                    if len(wise) == 0:
+                        no_wiserep.append(subpath)
+                        continue
+
                     path_dic[sub]=subpath
                     z_dic[sub]=wise['Redshift'].iloc[0]
                     coord_dic[sub]=np.array(list(wise[['Obj. RA','Obj. DEC']].iloc[0]))
@@ -88,20 +123,30 @@ class Metadata(object):
 
 
 
-                        if float(MJD_dictionary[sub]) == -1:
+                        # An object the phase table does not list, or lists
+                        # with the -1 sentinel, has an unknown phase -- the
+                        # same answer, and one this already understood. It
+                        # used to be a bare subscript, so a bank whose table
+                        # does not cover every object it ships raised
+                        # KeyError instead; the larger banks leave thousands
+                        # of objects uncovered. Same for a maximum that will
+                        # not parse, and for a spectrum with no epoch of its
+                        # own to subtract it from.
+                        mjd_peak = _as_float(MJD_dictionary.get(sub))
+                        observed_jd = _as_float(wise['JD'].iloc[i])
+
+                        if mjd_peak is None or mjd_peak == -1 or observed_jd is None:
 
                             phase = 'u'
 
                         else:
 
-                            phase = float(wise['JD'].iloc[i]) - JD(float(MJD_dictionary[sub]))
-
-                            phase = round(phase,2)
+                            phase = round(observed_jd - JD(mjd_peak), 2)
 
 
                         if parameters.epoch_high == parameters.epoch_low:
 
-                            band = band_dictionary[sub]
+                            band = band_dictionary.get(sub, '')
 
                             shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'].iloc[i]+' phase-band : '+ str(phase) + str(band)
 
@@ -115,7 +160,7 @@ class Metadata(object):
 
                             if phase!='u' and phase >= parameters.epoch_low and phase <= parameters.epoch_high:
 
-                                band = band_dictionary[sub]
+                                band = band_dictionary.get(sub, '')
 
                                 shorhand_dict[spec_file]=sn_type + '/' + sub + '/' + wise['Instrument'].iloc[i]+' phase-band : '+ str(phase) + str(band)
 

@@ -94,6 +94,12 @@ DEFAULT_CONFIG = {
     # any Galactic component is absorbed into the same single term.
     "R_v": 3.1,
     # --- templates -------------------------------------------------------
+    # Which template bank to fit against, by name: "legacy", "modern-curated",
+    # "modern", or anything registered with `superfit bank install --from`.
+    # Empty means "whatever this machine resolves to", which is what every
+    # fit did before there was more than one bank. Recorded in the run's
+    # config because which bank produced a classification is part of it.
+    "bank": "",
     "temp_sn_tr": ALL_SN_TYPES,
     "temp_gal_tr": ALL_GALAXY_TYPES,
     "resolution": 10,

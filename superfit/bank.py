@@ -68,6 +68,178 @@ def default_install_dir():
     return user_data_dir() / "bank"
 
 
+# Banks superfit knows by name.
+#
+# There is more than one now, and they differ scientifically rather than
+# incidentally: the legacy bank is what published superfit results were
+# produced against, and the modern ones are a larger, provenance-tracked
+# rebuild with DESI DR1 host galaxies. Which one a fit used is part of the
+# result, so it is a named choice recorded in the run's config rather than
+# an environment variable someone set months ago.
+#
+# `url` is None for a bank that is not published yet: those are installed
+# from a directory with `superfit bank install <name> --from PATH`.
+KNOWN_BANKS = {
+    "legacy": {
+        "summary": "The published superfit bank",
+        "description": (
+            "1007 supernova templates and 12 host galaxies. What superfit "
+            "has always shipped, and what published classifications were "
+            "produced against."
+        ),
+        "url": BANK_URL,
+        "sha256": BANK_SHA256,
+    },
+    "modern-curated": {
+        "summary": "Modern empirical bank, balanced",
+        "description": (
+            "2474 supernova templates and 128 DESI DR1 host galaxies, "
+            "curated for balance across type and phase. The recommended "
+            "modern default."
+        ),
+        "url": None,
+        "sha256": None,
+    },
+    "modern": {
+        "summary": "Modern empirical bank, full",
+        "description": (
+            "15561 supernova templates and 128 DESI DR1 host galaxies: "
+            "every template that passed quality cuts, unbalanced. Slower, "
+            "and biased towards whichever types were observed most."
+        ),
+        "url": None,
+        "sha256": None,
+    },
+}
+
+# What `superfit bank install` and a fit with no bank named will use.
+DEFAULT_BANK = "legacy"
+
+# Where the name -> directory registry lives. A bank installed from a
+# directory is recorded here rather than copied: the modern banks are 0.4 and
+# 1.3 GB, and on a shared filesystem one copy per user is a waste of the
+# quota it comes out of.
+REGISTRY_NAME = "banks.json"
+
+
+class UnknownBank(BankError):
+    """Raised when a bank is asked for by a name superfit does not know."""
+
+
+def registry_path():
+    """The file recording which named banks are installed where."""
+
+    return user_data_dir() / REGISTRY_NAME
+
+
+def read_registry():
+    """Name -> directory, for every bank registered on this machine."""
+
+    try:
+        data = json.loads(registry_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.get("banks", {}).items()}
+
+
+def write_registry(banks):
+    """Record the name -> directory map, atomically."""
+
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    scratch = path.with_name(path.name + ".tmp")
+    scratch.write_text(json.dumps({"banks": dict(banks)}, indent=2, sort_keys=True))
+    scratch.replace(path)
+    return path
+
+
+def register(name, directory):
+    """Point ``name`` at ``directory`` for future fits."""
+
+    directory = Path(directory).expanduser().resolve()
+    if not directory.is_dir():
+        raise BankError("No such bank directory: {}".format(directory))
+
+    banks = read_registry()
+    banks[name] = str(directory)
+    write_registry(banks)
+    return directory
+
+
+def unregister(name):
+    """Forget ``name``. Does not delete anything on disk."""
+
+    banks = read_registry()
+    removed = banks.pop(name, None)
+    if removed is not None:
+        write_registry(banks)
+    return removed
+
+
+def bank_install_dir(name):
+    """Where ``superfit bank install <name>`` unpacks a downloaded bank.
+
+    The legacy bank keeps the unnamed location it has always used, so an
+    existing installation is still found after upgrading.
+    """
+
+    if name == DEFAULT_BANK:
+        return default_install_dir()
+    return user_data_dir() / "banks" / name
+
+
+def resolve_bank(name):
+    """The directory for a named bank, or None if it is not installed.
+
+    The registry wins over the install directory, so a bank registered from
+    a directory on a shared filesystem is used in preference to a stale copy
+    someone unpacked earlier.
+    """
+
+    if name not in KNOWN_BANKS:
+        registered = read_registry().get(name)
+        if registered is None:
+            raise UnknownBank(
+                "No bank named {!r}. Known names: {}. Any other name has to "
+                "be registered first with `superfit bank install <name> "
+                "--from <directory>`.".format(
+                    name, ", ".join(sorted(KNOWN_BANKS))
+                )
+            )
+        return registered if os.path.isdir(registered) else None
+
+    registered = read_registry().get(name)
+    if registered and os.path.isdir(registered):
+        return registered
+
+    installed = bank_install_dir(name)
+    return str(installed) if installed.is_dir() else None
+
+
+def installed_banks():
+    """Every bank this machine can use, as ``{name: directory}``."""
+
+    found = {}
+
+    for name in KNOWN_BANKS:
+        directory = None
+        try:
+            directory = resolve_bank(name)
+        except BankError:
+            pass
+        if directory:
+            found[name] = directory
+
+    for name, directory in read_registry().items():
+        if os.path.isdir(directory):
+            found[name] = directory
+
+    return found
+
 def sha256_of(path, block=1 << 20):
     """Hex sha256 of a file, read in chunks so a 74 MB zip is not held in RAM."""
 
@@ -308,6 +480,58 @@ def install(
     return read_manifest(destination)
 
 
+def install_from_directory(name, source, copy=False, quiet=False):
+    """Make an existing bank directory available under ``name``.
+
+    By default this records where the bank is rather than copying it. The
+    modern banks are 0.4 and 1.3 GB; on a shared filesystem, one copy per
+    user is a waste of the quota it comes out of, and a bank that everyone
+    reads from one place is also a bank everyone packs once. ``copy=True``
+    materialises it under the per-user data directory for a bank that lives
+    somewhere temporary.
+
+    Returns the directory the name now resolves to.
+    """
+
+    source = Path(source).expanduser()
+    if not source.is_dir():
+        raise BankError("No such directory: {}".format(source))
+
+    missing = [d for d in REQUIRED_SUBDIRS if not (source / d).is_dir()]
+    if missing:
+        raise BankError(
+            "{} has no {} directory, so it does not look like a superfit "
+            "template bank.".format(source, " or ".join(missing))
+        )
+
+    if not copy:
+        directory = register(name, source)
+        if not quiet:
+            print("Registered {!r} -> {}".format(name, directory))
+        return directory
+
+    destination = bank_install_dir(name)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    staging = Path(
+        tempfile.mkdtemp(prefix=".{}-".format(destination.name), dir=destination.parent)
+    )
+    try:
+        if not quiet:
+            print("Copying {} -> {}".format(source, destination))
+        # dirs_exist_ok: staging is already there, made by mkdtemp.
+        shutil.copytree(source, staging, dirs_exist_ok=True, symlinks=True)
+        if destination.exists():
+            shutil.rmtree(destination)
+        staging.replace(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    register(name, destination)
+    return destination
+
+
 def status(directory=None):
     """Describe the template bank this machine would use.
 
@@ -325,6 +549,7 @@ def status(directory=None):
         "n_galaxy_templates": 0,
         "manifest": None,
         "install_dir": str(default_install_dir()),
+        "packed": None,
         "error": None,
     }
 
@@ -365,5 +590,35 @@ def status(directory=None):
         report["n_galaxy_templates"] = sum(
             1 for p in gal.iterdir() if p.is_file() and not p.name.startswith(".")
         )
+
+    report["packed"] = pack_status(found)
+
+    return report
+
+
+def pack_status(directory):
+    """Which of a bank's template directories have a usable pack.
+
+    A stale pack counts as unpacked: it is what a fit would do with it.
+    Reported so that "why is every run ten seconds slow" has an answer in
+    ``superfit bank status`` rather than needing a profiler.
+    """
+
+    from superfit import packed
+
+    directory = str(directory)
+    report = {"root": None, "packed": [], "unpacked": []}
+
+    for relative in packed.packable_directories(directory):
+        if packed.open_pack(directory, relative) is None:
+            report["unpacked"].append(relative)
+        else:
+            report["packed"].append(relative)
+
+    if report["packed"]:
+        for root in packed.pack_roots(directory):
+            if os.path.isdir(root):
+                report["root"] = root
+                break
 
     return report

@@ -16,12 +16,12 @@ from superfit.get_metadata import get_metadata
 from superfit.error_routines import savitzky_golay, linear_error
 from superfit.Header_Binnings import (
     bin_spectrum_bank,
-    kill_header,
     mask_host_lines,
     mask_lines_bank,
     normalise_flux,
 )
 from superfit.loggrid import RedshiftableTemplates
+from superfit.packed import load_template
 from superfit.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
@@ -679,19 +679,35 @@ def all_parameter_space(
 
     #print(len(all_bank_files))
 
+    # Templates the bank lists but cannot supply. One bank's metadata names
+    # eight spectra that are not on disk, and another has a hundred-odd whose
+    # flux column carries the literal string "None" -- and a single one of
+    # them used to end a 15000-template fit with a traceback from inside
+    # np.loadtxt. A template that will not load is one template missing from
+    # the comparison, not a reason to throw the other 15000 away, so they are
+    # collected and reported together at the end.
+    unreadable = []
+
+    def read_sn(path, reader):
+        try:
+            return load_template(path, reader)
+        except (OSError, ValueError) as exc:
+            unreadable.append((path, "{}: {}".format(type(exc).__name__, exc)))
+            return None
+
     if resolution == 10 or resolution == 30:
 
         for i in range(0, len(all_bank_files)):
             a = all_bank_files[i]
 
             full_name = a[a.find("sne") :]
-            one_sn = os.path.join(binning_dir(resolution), full_name)
-
+            one_sn = read_sn(
+                os.path.join(binning_dir(resolution), full_name), "loadtxt"
+            )
+            if one_sn is None:
+                continue
             if mask_galaxy_lines:
-                one_sn = np.loadtxt(one_sn)
                 one_sn = mask_lines_bank(one_sn)
-            else:
-                one_sn = np.loadtxt(one_sn)
 
             idx = all_bank_files[i].rfind("/") + 1
             filename = all_bank_files[i][idx:]
@@ -706,7 +722,9 @@ def all_parameter_space(
         # Any other resolution: bin the original-resolution bank on the fly.
         for i in range(0, len(all_bank_files)):
 
-            one_sn = kill_header(all_bank_files[i])
+            one_sn = read_sn(all_bank_files[i], "kill_header")
+            if one_sn is None:
+                continue
             if mask_galaxy_lines:
                 one_sn = mask_lines_bank(one_sn)
             one_sn = bin_spectrum_bank(one_sn, resolution)
@@ -721,11 +739,37 @@ def all_parameter_space(
 
     for i in range(0, len(templates_gal_trunc)):
 
-        one_gal = np.loadtxt(templates_gal_trunc[i])
+        one_gal = load_template(templates_gal_trunc[i], "loadtxt")
         one_gal = bin_spectrum_bank(one_gal, resolution)
         templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
 
     sn_spec_files = [x for x in path_dict.keys()]
+
+    if unreadable:
+        # Loud, and with examples: a bank quietly fitting against fewer
+        # templates than it advertises is a result nobody can reproduce.
+        print(
+            "WARNING: {0} of {1} supernova templates could not be read and "
+            "were left out of this fit. The bank lists them but cannot "
+            "supply them; the classification below is against the remaining "
+            "{2}.".format(
+                len(unreadable), len(all_bank_files), len(sn_spec_files)
+            )
+        )
+        for path, why in unreadable[:3]:
+            print("    {0}: {1}".format(path, why))
+        if len(unreadable) > 3:
+            print("    ... and {0} more".format(len(unreadable) - 3))
+
+    if not sn_spec_files:
+        raise RuntimeError(
+            "None of the {0} supernova templates this bank lists could be "
+            "read, so there is nothing to fit against. The first failure was "
+            "{1}".format(
+                len(all_bank_files),
+                unreadable[0][1] if unreadable else "not recorded",
+            )
+        )
 
     print(
         "Loaded {0} SN and {1} galaxy templates in {2: .1f}s".format(
