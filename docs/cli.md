@@ -125,12 +125,54 @@ as a full JSON file.
 
 ## `superfit bank`
 
-### `superfit bank install`
+### `superfit bank list`
 
-Download, verify and unpack the template bank.
+Show the banks superfit knows by name and which are installed here.
 
 ```bash
-superfit bank install
+$ superfit bank list
+Template banks superfit knows by name:
+
+  legacy           The published superfit bank  [installed]
+      1007 supernova templates and 12 host galaxies. What superfit has
+      always shipped, and what published classifications were produced
+      against.
+      at /home/you/.local/share/superfit/bank
+
+  modern-curated   Modern empirical bank, balanced  [installed]
+      2474 supernova templates and 128 DESI DR1 host galaxies, curated for
+      balance across type and phase. The recommended modern default.
+      at /shared/banks/bank_modern_curated_v1
+
+  modern           Modern empirical bank, full  [not installed]
+      15561 supernova templates and 128 DESI DR1 host galaxies: every
+      template that passed quality cuts, unbalanced.
+      Not published; install with --from <directory>.
+```
+
+The banks differ scientifically, not incidentally — the legacy bank is what
+published superfit results were produced against, and the modern ones are a
+larger, provenance-tracked rebuild with DESI DR1 host galaxies. Which one a
+fit used is part of its result, so it is recorded in the run's `config.json`.
+
+Fit against one with `--bank`:
+
+```bash
+superfit fit spectrum.flm --z 0.127 --bank modern-curated
+```
+
+Or set `SUPERFIT_BANK=modern-curated` for a shell, or `"bank":
+"modern-curated"` in a config file. `--bank` beats the config file, which
+beats `$SUPERFIT_BANK_DIR`, which beats `$SUPERFIT_BANK`. Naming a bank that
+is not installed stops rather than falling back to another one.
+
+### `superfit bank install`
+
+Download, verify and unpack a template bank, by name.
+
+```bash
+superfit bank install                    # legacy, the default
+superfit bank install modern-curated --from /shared/bank_modern_curated_v1
 ```
 
 It goes into the platform's per-user data directory
@@ -140,6 +182,8 @@ which `superfit` searches automatically. No environment variable needed.
 
 | Flag | Meaning |
 | --- | --- |
+| `--from DIR` | Install from a bank directory already on disk. |
+| `--copy` | With `--from`, copy the bank instead of pointing at it. |
 | `--dir PATH` | Install somewhere else. |
 | `--archive PATH` | Use a zip already on disk instead of downloading. |
 | `--url URL` | Download from somewhere else. |
@@ -147,6 +191,12 @@ which `superfit` searches automatically. No environment variable needed.
 | `--no-verify` | Skip the checksum check. |
 | `--quiet` | No progress bars. |
 | `--no-pack` | Skip the packing step below. |
+
+`--from` **records where the bank is rather than copying it**. The modern
+banks are 0.4 and 1.3 GB; on shared storage, one copy per user wastes the
+quota it comes out of, and a bank everyone reads from one place is also a
+bank that only has to be packed once. Pass `--copy` for a bank that lives
+somewhere temporary.
 
 The archive is checked against a checksum pinned in the package, so a
 truncated or substituted download is caught immediately rather than showing
@@ -175,14 +225,23 @@ other way — unzipped, copied from a colleague, or pointed at with
 
 | Flag | Meaning |
 | --- | --- |
+| `--bank NAME` | Pack the bank with this name. |
 | `--dir PATH` | Pack this bank instead of the one a fit would use. |
+| `--jobs N` | Processes to parse with (default 8). |
 | `--quiet` | Do not list what was packed. |
 
-A fit reads roughly a thousand template files. Parsing them is cheap;
-*opening* them is not, because on a parallel filesystem every open is a round
-trip to a metadata server. Measured on Perlmutter's CFS, the first fit of the
-day spent 10.9 s getting the 10 Å bank off disk, of which 0.67 s was parsing.
-From the pack the same templates arrive in about 40 ms.
+A fit reads one template file per template. Parsing them is cheap; *opening*
+them is not, because on a parallel filesystem every open is a round trip to a
+metadata server. Measured on Perlmutter's CFS:
+
+| Bank | Templates | Loading, text | Loading, packed | Whole fit |
+| --- | --- | --- | --- | --- |
+| legacy | 1007 | 10.9 s cold | 0.2 s | 1.18 s → 0.58 s |
+| modern | 15561 | 77.6 s | 3.1 s | 84.7 s → 10.0 s |
+
+Packing is itself dominated by parsing — `kill_header` manages 27 files a
+second — so it runs across `--jobs` processes. The full modern bank takes
+about two minutes to pack on 8, against fifteen on one.
 
 The pack goes next to the bank when that directory is writable, so a shared
 bank is packed once for everyone, and in the per-user data directory when it

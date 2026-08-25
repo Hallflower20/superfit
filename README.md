@@ -24,6 +24,28 @@ If you already have a bank — unzipped by hand, or shared on a cluster — pack
 it once with `superfit bank pack`. See
 [docs/cli.md](docs/cli.md#superfit-bank-pack).
 
+### Choosing a bank
+
+There is more than one template bank, and they differ scientifically:
+
+```bash
+superfit bank list
+```
+
+`legacy` is the published bank that superfit has always shipped, and the
+default. `modern-curated` and `modern` are a larger, provenance-tracked
+rebuild with DESI DR1 host galaxies. Install one that already exists on disk
+and fit against it by name:
+
+```bash
+superfit bank install modern-curated --from /shared/bank_modern_curated_v1
+superfit fit spectrum.flm --z 0.127 --bank modern-curated
+```
+
+The bank name is recorded in each run's `config.json`, because which
+templates produced a classification is part of the classification. See
+[docs/cli.md](docs/cli.md#superfit-bank-list).
+
 Check it worked:
 
 ```bash

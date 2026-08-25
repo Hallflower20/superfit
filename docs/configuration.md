@@ -201,6 +201,16 @@ given infinite chi2. Keep it near the default of 0.7.
 
 ## Templates
 
+`bank` — which template bank to fit against, by name: `legacy`,
+`modern-curated`, `modern`, or anything registered with `superfit bank
+install <name> --from <directory>`. Empty (the default) means "whatever this
+machine resolves to", which is what every fit did when there was only one
+bank. See [docs/cli.md](cli.md#superfit-bank-list).
+
+Which bank produced a classification is part of the result, so the name is
+written into the run's `config.json`. Naming a bank that is not installed
+stops the fit rather than falling back to a different one.
+
 `temp_sn_tr`, `temp_gal_tr` — which supernova subtypes and host galaxy types
 to consider. Both default to everything in the bank, which is the
 recommendation; narrowing them is for asking a specific question, not for

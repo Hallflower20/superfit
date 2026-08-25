@@ -18,6 +18,11 @@ import sys
 # used to have and is still honoured.
 BANK_DIR_ENV_VARS = ("SUPERFIT_BANK_DIR", "NGSF_BANK_DIR")
 
+# Names a bank, rather than giving its path: "legacy", "modern-curated".
+# Lower precedence than SUPERFIT_BANK_DIR, which is a specific directory and
+# so a more specific instruction.
+BANK_NAME_ENV_VAR = "SUPERFIT_BANK"
+
 BANK_URL = "https://www.wiserep.org/sites/default/files/supyfit_bank.zip"
 
 # Directory containing this file, i.e. the installed superfit package.
@@ -81,8 +86,32 @@ def _user_data_bank_dir():
     return os.path.join(base, "superfit", "bank")
 
 
-def find_bank_dir(use_cache=True):
+def bank_dir_for_name(name):
+    """The directory holding the bank called ``name``.
+
+    Raises rather than falling back: someone who names a bank means that
+    bank, and quietly fitting against a different one is worse than stopping.
+    """
+
+    from superfit.bank import UnknownBank, resolve_bank
+
+    directory = resolve_bank(name)
+    if directory is None:
+        raise FileNotFoundError(
+            "The bank named {!r} is not installed on this machine.\n\n"
+            "Install it with:\n\n    superfit bank install {}\n\n"
+            "or, for a bank that already exists on disk:\n\n"
+            "    superfit bank install {} --from <directory>\n\n"
+            "`superfit bank list` shows what is available.".format(name, name, name)
+        )
+    return directory
+
+
+def find_bank_dir(use_cache=True, name=None):
     """Return the template bank directory, or raise with a useful message.
+
+    ``name`` selects a bank by name and overrides everything else -- it is
+    the fit saying which bank it wants, which beats any ambient setting.
 
     ``use_cache=False`` re-resolves without touching the cache. It used to
     overwrite it, so merely *inspecting* the bank -- ``superfit bank status``,
@@ -90,6 +119,9 @@ def find_bank_dir(use_cache=True):
     chosen with :func:`set_bank_dir`, and the next fit ran against a
     different bank than the one just reported.
     """
+
+    if name:
+        return os.path.abspath(bank_dir_for_name(name))
 
     if use_cache and _cached_bank_dir is not None:
         return _cached_bank_dir
@@ -105,6 +137,10 @@ def find_bank_dir(use_cache=True):
     if override is not None:
         return remember(override)
 
+    named = os.environ.get(BANK_NAME_ENV_VAR)
+    if named:
+        return remember(bank_dir_for_name(named))
+
     tried = []
     for candidate in _candidate_bank_dirs():
         tried.append(candidate)
@@ -117,8 +153,91 @@ def find_bank_dir(use_cache=True):
         + "\n\nInstall it with:\n\n    superfit bank install\n\n"
         "or download it from "
         + BANK_URL
-        + " and point SUPERFIT_BANK_DIR at it."
+        + " and point SUPERFIT_BANK_DIR at it.\n\n"
+        "`superfit bank list` shows the banks superfit knows by name."
     )
+
+
+# The phase table's first column names the object; the rest describe its
+# maximum. A table without the name column cannot be looked up in, whatever
+# else it contains.
+PHASE_TABLE_NAME_COLUMN = "Name"
+
+
+def phase_table_is_usable(path):
+    """Whether a phase table has the ``Name`` column callers key on.
+
+    Returns ``(ok, reason)``. Only the header is read.
+
+    This exists because a table can be present, non-empty and still
+    unusable: dropping the name column leaves a file whose every row parses
+    and whose every key is a maximum-light MJD, so nothing raises and no
+    object ever matches. Silent, and it degrades classification rather than
+    stopping it, which is the worst way for this to fail.
+    """
+
+    try:
+        with open(path) as handle:
+            header = handle.readline()
+    except OSError as exc:
+        return False, "cannot be read ({})".format(exc)
+
+    if not header.strip():
+        return False, "is empty"
+
+    columns = [c.strip().strip('"') for c in header.split(",")]
+    if columns[0] != PHASE_TABLE_NAME_COLUMN:
+        return False, (
+            "has no {!r} column -- its header is {!r}. Every lookup is by "
+            "object name, so a table without that column silently matches "
+            "nothing".format(PHASE_TABLE_NAME_COLUMN, header.strip())
+        )
+
+    return True, None
+
+
+def mjd_max_brightness_csv(bank_dir=None, warn=True):
+    """The phase table to use: the bank's own if it has one, else the package's.
+
+    A bank that carries its own table knows the objects in it, which the copy
+    shipped with the package cannot -- that one lists the 189 objects the
+    legacy bank was built from, and a bank of 15561 templates from elsewhere
+    needs its own. This is how such a table gets used, without a caller
+    assigning over module globals to arrange it.
+
+    A bank-local table that is not usable is refused rather than used: the
+    package copy giving too few phases is a visible shortfall, while a
+    malformed table giving none at all looks exactly like success.
+    """
+
+    if bank_dir is None:
+        try:
+            bank_dir = find_bank_dir()
+        except FileNotFoundError:
+            return MJD_MAX_BRIGHTNESS_CSV
+
+    local = os.path.join(bank_dir, "mjd_of_maximum_brightness.csv")
+    if not os.path.isfile(local):
+        return MJD_MAX_BRIGHTNESS_CSV
+
+    ok, reason = phase_table_is_usable(local)
+    if ok:
+        return local
+
+    if warn:
+        import warnings
+
+        warnings.warn(
+            "Ignoring the phase table shipped with this bank: {} {}. Falling "
+            "back to the copy inside the package, which only knows the "
+            "objects the legacy bank was built from -- so templates from "
+            "this bank will report an unknown phase. Fix the table in the "
+            "bank to get phases back.".format(local, reason),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return MJD_MAX_BRIGHTNESS_CSV
 
 
 def set_bank_dir(path):

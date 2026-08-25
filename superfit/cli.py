@@ -130,6 +130,13 @@ def _add_fit_parser(subparsers):
 
     fitting = fit.add_argument_group("the fit")
     fitting.add_argument(
+        "--bank",
+        metavar="NAME",
+        help="Which template bank to fit against: legacy, modern-curated, "
+        "modern, or any name registered with `superfit bank install --from`. "
+        "See `superfit bank list`.",
+    )
+    fitting.add_argument(
         "--resolution", type=int, metavar="A", help="Binning resolution in Angstroms."
     )
     fitting.add_argument(
@@ -231,12 +238,32 @@ def _add_bank_parser(subparsers):
 
     install = actions.add_parser(
         "install",
-        help="download and unpack the template bank",
-        description="Download, verify and unpack the template bank into a "
+        help="install a template bank, by name",
+        description="Download, verify and unpack a template bank into a "
         "standard per-user data directory, which superfit searches "
-        "automatically. No environment variable needed.",
+        "automatically. No environment variable needed. `superfit bank list` "
+        "shows the names.",
     )
     install.set_defaults(handler=run_bank_install)
+    install.add_argument(
+        "name",
+        nargs="?",
+        help="Which bank to install (default: legacy). See `superfit bank list`.",
+    )
+    install.add_argument(
+        "--from",
+        dest="from_dir",
+        metavar="DIR",
+        help="Install from a bank directory already on disk instead of "
+        "downloading. Records where it is rather than copying it, which is "
+        "what you want for a bank on shared storage.",
+    )
+    install.add_argument(
+        "--copy",
+        action="store_true",
+        help="With --from, copy the bank into the per-user data directory "
+        "rather than pointing at it where it is.",
+    )
     install.add_argument("--dir", help="Install here instead of the default location.")
     install.add_argument(
         "--archive",
@@ -272,9 +299,25 @@ def _add_bank_parser(subparsers):
     )
     pack.set_defaults(handler=run_bank_pack)
     pack.add_argument("--dir", help="Pack this bank instead of the one a fit would use.")
+    pack.add_argument("--bank", help="Pack the bank with this name.")
+    pack.add_argument(
+        "--jobs",
+        type=int,
+        metavar="N",
+        help="Processes to parse templates with (default 8). The largest "
+        "bank is ten minutes of parsing on one core.",
+    )
     pack.add_argument(
         "--quiet", action="store_true", help="Do not list what was packed."
     )
+
+    listing = actions.add_parser(
+        "list",
+        help="list the template banks superfit knows about",
+        description="List the banks superfit knows by name, which of them "
+        "are installed on this machine, and where.",
+    )
+    listing.set_defaults(handler=run_bank_list)
 
     status = actions.add_parser(
         "status",
@@ -284,6 +327,7 @@ def _add_bank_parser(subparsers):
     )
     status.set_defaults(handler=run_bank_status)
     status.add_argument("--dir", help="Inspect this directory instead of searching.")
+    status.add_argument("--bank", help="Inspect the bank with this name.")
 
     bank.set_defaults(handler=lambda args: _needs_action(bank))
     return bank
@@ -425,6 +469,8 @@ def fit_overrides(args):
     if args.hdu is not None:
         overrides["spectrum_hdu"] = _int_or_name(args.hdu)
 
+    if args.bank:
+        overrides["bank"] = args.bank
     if args.resolution is not None:
         overrides["resolution"] = args.resolution
     if args.error_model is not None:
@@ -531,49 +577,130 @@ def print_summary(result, quiet=False, top=3):
 # -- bank ------------------------------------------------------------------
 
 
-def run_bank_install(args):
-    from superfit import bank
+def run_bank_list(args):
+    from superfit import bank, packed
 
-    manifest = bank.install(
-        destination=args.dir,
-        url=args.url or bank.BANK_URL,
-        archive=args.archive,
-        overwrite=args.overwrite,
-        expected_sha256=None if args.no_verify else bank.BANK_SHA256,
-        quiet=args.quiet,
-    )
+    installed = bank.installed_banks()
 
-    from superfit import paths
+    print("Template banks superfit knows by name:\n")
+    for name, entry in bank.KNOWN_BANKS.items():
+        directory = installed.get(name)
+        mark = "installed" if directory else "not installed"
+        print("  {:<16} {}  [{}]".format(name, entry["summary"], mark))
+        print("      {}".format(entry["description"]))
+        if directory:
+            pack = packed.open_pack(directory, "binnings/10A/sne")
+            print("      at {}{}".format(
+                directory, "" if pack else "   (not packed -- `superfit bank pack`)"))
+        elif entry["url"] is None:
+            print("      Not published; install with --from <directory>.")
+        print()
 
-    print("\nTemplate bank installed in {}".format(paths.find_bank_dir()))
-    print("  sha256 {}".format(manifest["sha256"]))
+    extra = {n: d for n, d in installed.items() if n not in bank.KNOWN_BANKS}
+    if extra:
+        print("Also registered on this machine:\n")
+        for name, directory in sorted(extra.items()):
+            print("  {:<16} {}".format(name, directory))
+        print()
 
-    if not args.no_pack:
-        # A fit that reads the text files opens a thousand of them, which on a
-        # parallel filesystem is most of a cold run. Doing it here means the
-        # first fit is already fast, and a failure is reported now rather than
-        # silently costing every run a few seconds.
-        from superfit import packed
-
-        if not args.quiet:
-            print("\nPacking the bank so fits open two files instead of a thousand")
-        try:
-            packed.pack(paths.find_bank_dir(), quiet=args.quiet)
-        except (packed.PackError, OSError) as exc:
-            print("  WARNING: could not pack the bank: {}".format(exc))
-            print("  Fits will read the template files directly, just slower.")
-
-    print("\nNothing else to set up. Try:\n\n    superfit fit spectrum.flm --z 0.1\n")
+    print("Fit against one with:  superfit fit spectrum.flm --z 0.1 --bank <name>")
     return 0
 
 
-def run_bank_pack(args):
-    from superfit import packed, paths
+def run_bank_install(args):
+    from superfit import bank, packed, paths
 
-    directory = args.dir or paths.find_bank_dir()
+    name = args.name or bank.DEFAULT_BANK
+
+    if args.from_dir:
+        directory = bank.install_from_directory(
+            name, args.from_dir, copy=args.copy, quiet=args.quiet
+        )
+        if not args.no_pack:
+            _pack_installed(str(directory), args)
+        print(
+            "\nBank {!r} ready. Fit against it with:\n\n"
+            "    superfit fit spectrum.flm --z 0.1 --bank {}\n".format(name, name)
+        )
+        return 0
+
+    entry = bank.KNOWN_BANKS.get(name)
+    if entry is None:
+        print("No bank named {!r}. Try `superfit bank list`.".format(name))
+        return 1
+    if entry["url"] is None and not args.url:
+        print(
+            "The bank {!r} is not published, so there is nothing to download.\n"
+            "Install it from a directory you already have:\n\n"
+            "    superfit bank install {} --from <directory>\n".format(name, name)
+        )
+        return 1
+
+    destination = args.dir or bank.bank_install_dir(name)
+
+    manifest = bank.install(
+        destination=destination,
+        url=args.url or entry["url"],
+        archive=args.archive,
+        overwrite=args.overwrite,
+        expected_sha256=None if args.no_verify else entry["sha256"],
+        quiet=args.quiet,
+    )
+
+    bank.register(name, destination)
+
+    print("\nTemplate bank {!r} installed in {}".format(name, destination))
+    print("  sha256 {}".format(manifest["sha256"]))
+
+    if not args.no_pack:
+        _pack_installed(str(destination), args)
+
+    print(
+        "\nNothing else to set up. Try:\n\n"
+        "    superfit fit spectrum.flm --z 0.1 --bank {}\n".format(name)
+    )
+    return 0
+
+
+def _pack_installed(directory, args):
+    """Pack a bank just installed, reporting rather than raising on failure.
+
+    A fit that reads the text files opens a thousand of them, which on a
+    parallel filesystem is most of a cold run. Doing it at install time means
+    the first fit is already fast, and a bank that cannot be packed says so
+    now rather than costing every run a few seconds in silence.
+    """
+
+    from superfit import packed
+
+    if not getattr(args, "quiet", False):
+        print("\nPacking the bank so fits open two files instead of a thousand")
+    try:
+        packed.pack(
+            directory, quiet=getattr(args, "quiet", False), jobs=getattr(args, "jobs", None)
+        )
+    except (packed.PackError, OSError) as exc:
+        print("  WARNING: could not pack the bank: {}".format(exc))
+        print("  Fits will read the template files directly, just slower.")
+
+
+def _bank_directory(args):
+    """The bank a `superfit bank` subcommand should act on."""
+
+    from superfit import paths
+
+    if getattr(args, "dir", None):
+        return args.dir
+    return paths.find_bank_dir(name=getattr(args, "bank", None) or None)
+
+
+def run_bank_pack(args):
+    from superfit import packed
+
+    directory = _bank_directory(args)
 
     try:
-        indexes = packed.pack(directory, quiet=args.quiet)
+        indexes = packed.pack(directory, quiet=args.quiet, jobs=args.jobs)
     except (packed.PackError, OSError) as exc:
         print("Could not pack {}: {}".format(directory, exc))
         return 1
@@ -589,7 +716,7 @@ def run_bank_pack(args):
 def run_bank_status(args):
     from superfit import bank
 
-    report = bank.status(args.dir)
+    report = bank.status(_bank_directory(args) if getattr(args, "bank", None) else args.dir)
 
     if not report["found"]:
         print("No template bank found.\n")

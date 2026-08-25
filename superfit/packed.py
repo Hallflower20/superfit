@@ -51,6 +51,12 @@ INDEX_SUFFIX = ".index.json"
 # spend its time failing to parse photometry PDFs.
 NON_TEMPLATE_NAMES = ("wiserep_spectra.csv", "info", "photometry", "photometry.pdf")
 
+# Processes used to parse templates, when the caller does not say. Deliberately
+# modest: packing is a setup step that often runs on a shared login node, and
+# quietly taking 200 cores there to save a minute is not a trade to make on
+# the user's behalf. `superfit bank pack --jobs N` raises it.
+DEFAULT_PACK_JOBS = 8
+
 
 class PackError(RuntimeError):
     """Raised when a pack cannot be built. Never raised when reading one."""
@@ -201,7 +207,82 @@ def _array_path(root, relative_directory):
     return os.path.join(root, relative_directory + ".npy")
 
 
-def pack_directory(bank_dir, relative_directory, root=None, quiet=True):
+def _parse_one(args):
+    """Read one template. Module level, so a worker process can pickle it."""
+
+    directory, relative, reader_name = args
+
+    try:
+        array = np.asarray(
+            READERS[reader_name](os.path.join(directory, relative)), dtype=float
+        )
+    except Exception as exc:  # noqa: BLE001 -- any parse failure is the same answer
+        return relative, None, "{}: {}".format(type(exc).__name__, exc)
+
+    if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] < 2:
+        return relative, None, "not a 2-column spectrum"
+
+    return relative, array, None
+
+
+def resolve_pack_jobs(requested):
+    """How many processes to parse with.
+
+    Capped low by default. Packing is a setup step that runs on whatever
+    machine the user happens to be on -- often a shared login node -- and
+    taking every core there to save a minute is not a trade worth making
+    silently. ``--jobs`` raises it.
+    """
+
+    if requested is not None and requested > 0:
+        return int(requested)
+
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available = os.cpu_count() or 1
+
+    return max(1, min(available, DEFAULT_PACK_JOBS))
+
+
+def _parse_all(directory, listing, reader_name, jobs, quiet):
+    """Read every template in ``listing``, in order, across ``jobs`` processes.
+
+    Parsing dominates packing -- kill_header runs a Python ``float()`` per
+    value and manages 27 files a second, so the 15,561 original-resolution
+    templates of the largest bank are ten minutes of pure parsing on one
+    core. It is also embarrassingly parallel, so it is not spent on one core
+    unless asked.
+    """
+
+    work = [(directory, relative, reader_name) for relative, _size in listing]
+
+    if jobs > 1 and len(work) > jobs:
+        import multiprocessing as mp
+
+        ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else None)
+        chunksize = max(1, min(64, len(work) // (jobs * 8) or 1))
+        with ctx.Pool(processes=jobs) as pool:
+            results = pool.imap(_parse_one, work, chunksize=chunksize)
+            yield from _with_progress(results, len(work), directory, quiet)
+    else:
+        yield from _with_progress(
+            (_parse_one(item) for item in work), len(work), directory, quiet
+        )
+
+
+def _with_progress(results, total, directory, quiet):
+    if quiet:
+        yield from results
+        return
+
+    from tqdm import tqdm
+
+    with tqdm(results, total=total, unit="tmpl", desc=os.path.basename(directory)) as bar:
+        yield from bar
+
+
+def pack_directory(bank_dir, relative_directory, root=None, quiet=True, jobs=None):
     """Pack one template directory. Returns the index that was written.
 
     Written to a scratch name and renamed into place, so a fit reading the
@@ -212,7 +293,6 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True):
     directory = os.path.join(bank_dir, relative_directory)
     root = root or writable_pack_root(bank_dir)
     reader_name = reader_name_for(relative_directory)
-    reader = READERS[reader_name]
 
     listing = list_templates(directory)
     if not listing:
@@ -222,19 +302,14 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True):
     arrays = []
     skipped = []
 
-    for relative, _size in listing:
-        try:
-            array = np.asarray(reader(os.path.join(directory, relative)), dtype=float)
-        except Exception as exc:  # noqa: BLE001 -- any parse failure is the same answer
-            skipped.append((relative, "{}: {}".format(type(exc).__name__, exc)))
-            continue
-
-        if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] < 2:
-            skipped.append((relative, "not a 2-column spectrum"))
-            continue
-
-        names.append(relative)
-        arrays.append(array)
+    for relative, array, why in _parse_all(
+        directory, listing, reader_name, resolve_pack_jobs(jobs), quiet
+    ):
+        if array is None:
+            skipped.append((relative, why))
+        else:
+            names.append(relative)
+            arrays.append(array)
 
     if not arrays:
         raise PackError("No readable templates in {}".format(directory))
@@ -250,8 +325,14 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True):
     offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
 
     packed = np.full((int(offsets[-1]), width), np.nan, dtype=np.float64)
-    for array, start, stop in zip(arrays, offsets[:-1], offsets[1:]):
+    # Each template is dropped as it is copied in. The largest bank's
+    # original-resolution directory is 334 MB packed, and holding the list of
+    # pieces alongside the finished array would make that 670 MB for no
+    # reason.
+    for i, (start, stop) in enumerate(zip(offsets[:-1], offsets[1:])):
+        array = arrays[i]
         packed[start:stop, : array.shape[1]] = array
+        arrays[i] = None
 
     index = {
         "format": FORMAT_VERSION,
@@ -298,8 +379,13 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True):
     return index
 
 
-def pack(bank_dir=None, root=None, quiet=True):
-    """Pack every template directory in a bank. Returns the indexes written."""
+def pack(bank_dir=None, root=None, quiet=True, jobs=None, only=None):
+    """Pack every template directory in a bank. Returns the indexes written.
+
+    ``only`` restricts the work to the directories named in it, which is how
+    a caller packs the binnings it will actually fit at without paying for
+    the original-resolution bank it will not.
+    """
 
     if bank_dir is None:
         from superfit.paths import find_bank_dir
@@ -307,6 +393,10 @@ def pack(bank_dir=None, root=None, quiet=True):
         bank_dir = find_bank_dir()
 
     directories = packable_directories(bank_dir)
+    if only is not None:
+        wanted = set(only)
+        directories = [d for d in directories if d in wanted]
+
     if not directories:
         raise PackError(
             "{} has no template directories to pack. Is it a superfit "
@@ -314,11 +404,17 @@ def pack(bank_dir=None, root=None, quiet=True):
         )
 
     root = root or writable_pack_root(bank_dir)
+    jobs = resolve_pack_jobs(jobs)
+
     if not quiet:
-        print("Packing {} into {}".format(bank_dir, root))
+        print(
+            "Packing {} into {} ({} process{})".format(
+                bank_dir, root, jobs, "" if jobs == 1 else "es"
+            )
+        )
 
     return [
-        pack_directory(bank_dir, relative, root=root, quiet=quiet)
+        pack_directory(bank_dir, relative, root=root, quiet=quiet, jobs=jobs)
         for relative in directories
     ]
 
