@@ -61,6 +61,25 @@ class Parameters:
         self.save_results_path = data["saving_results_path"]
         self.overwrite = data["overwrite"]
 
+        # Resolved before anything below reads the bank -- the template lists
+        # at the end of this method glob it, and get_metadata walks it.
+        #
+        # A named bank is pinned process-wide rather than carried on this
+        # object, because the path helpers every reader goes through
+        # (sne_dir, gal_dir) take no parameters. That matches the constraint
+        # the fit already has: superfit serialises concurrent fits around
+        # _FIT_LOCK, so two banks are not in play at once. Naming no bank
+        # changes nothing and leaves the search path alone.
+        self.bank = data.get("bank") or ""
+        if self.bank:
+            from superfit.paths import bank_dir_for_name, set_bank_dir
+
+            self.bank_dir = set_bank_dir(bank_dir_for_name(self.bank))
+        else:
+            from superfit.paths import find_bank_dir
+
+            self.bank_dir = find_bank_dir()
+
         self.use_exact_z = data["use_exact_z"]
         self.z_exact = data["z_exact"]
         self.z_range_begin = data["z_range_begin"]
