@@ -16,12 +16,12 @@ from superfit.get_metadata import get_metadata
 from superfit.error_routines import savitzky_golay, linear_error
 from superfit.Header_Binnings import (
     bin_spectrum_bank,
-    kill_header,
     mask_host_lines,
     mask_lines_bank,
     normalise_flux,
 )
 from superfit.loggrid import RedshiftableTemplates
+from superfit.packed import load_template
 from superfit.paths import binning_dir
 
 np.seterr(divide="ignore", invalid="ignore")
@@ -687,11 +687,9 @@ def all_parameter_space(
             full_name = a[a.find("sne") :]
             one_sn = os.path.join(binning_dir(resolution), full_name)
 
+            one_sn = load_template(one_sn, "loadtxt")
             if mask_galaxy_lines:
-                one_sn = np.loadtxt(one_sn)
                 one_sn = mask_lines_bank(one_sn)
-            else:
-                one_sn = np.loadtxt(one_sn)
 
             idx = all_bank_files[i].rfind("/") + 1
             filename = all_bank_files[i][idx:]
@@ -706,7 +704,7 @@ def all_parameter_space(
         # Any other resolution: bin the original-resolution bank on the fly.
         for i in range(0, len(all_bank_files)):
 
-            one_sn = kill_header(all_bank_files[i])
+            one_sn = load_template(all_bank_files[i], "kill_header")
             if mask_galaxy_lines:
                 one_sn = mask_lines_bank(one_sn)
             one_sn = bin_spectrum_bank(one_sn, resolution)
@@ -721,7 +719,7 @@ def all_parameter_space(
 
     for i in range(0, len(templates_gal_trunc)):
 
-        one_gal = np.loadtxt(templates_gal_trunc[i])
+        one_gal = load_template(templates_gal_trunc[i], "loadtxt")
         one_gal = bin_spectrum_bank(one_gal, resolution)
         templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
 

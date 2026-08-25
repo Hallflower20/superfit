@@ -325,6 +325,7 @@ def status(directory=None):
         "n_galaxy_templates": 0,
         "manifest": None,
         "install_dir": str(default_install_dir()),
+        "packed": None,
         "error": None,
     }
 
@@ -365,5 +366,35 @@ def status(directory=None):
         report["n_galaxy_templates"] = sum(
             1 for p in gal.iterdir() if p.is_file() and not p.name.startswith(".")
         )
+
+    report["packed"] = pack_status(found)
+
+    return report
+
+
+def pack_status(directory):
+    """Which of a bank's template directories have a usable pack.
+
+    A stale pack counts as unpacked: it is what a fit would do with it.
+    Reported so that "why is every run ten seconds slow" has an answer in
+    ``superfit bank status`` rather than needing a profiler.
+    """
+
+    from superfit import packed
+
+    directory = str(directory)
+    report = {"root": None, "packed": [], "unpacked": []}
+
+    for relative in packed.packable_directories(directory):
+        if packed.open_pack(directory, relative) is None:
+            report["unpacked"].append(relative)
+        else:
+            report["packed"].append(relative)
+
+    if report["packed"]:
+        for root in packed.pack_roots(directory):
+            if os.path.isdir(root):
+                report["root"] = root
+                break
 
     return report

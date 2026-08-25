@@ -37,6 +37,7 @@ examples:
   superfit fit spectrum.flm --config parameters.json --overwrite
 
   superfit bank install          download and unpack the template bank
+  superfit bank pack             pack it so a fit opens two files, not a thousand
   superfit bank status           say which bank a fit would use
   superfit doctor                check this installation end to end
   superfit config create         write a documented parameter file
@@ -253,6 +254,27 @@ def _add_bank_parser(subparsers):
         "version of superfit does not know the checksum of.",
     )
     install.add_argument("--quiet", action="store_true", help="No progress bars.")
+    install.add_argument(
+        "--no-pack",
+        action="store_true",
+        help="Skip building the packed bank. Fits then read the template text "
+        "files, which is several seconds slower per run.",
+    )
+
+    pack = actions.add_parser(
+        "pack",
+        help="pack the template bank into one array per directory",
+        description="Concatenate each template directory into a single .npy "
+        "so a fit opens two files instead of a thousand. `bank install` does "
+        "this already; run it by hand for a bank installed some other way, or "
+        "after editing one. Packing is optional -- without it fits read the "
+        "text files, just more slowly.",
+    )
+    pack.set_defaults(handler=run_bank_pack)
+    pack.add_argument("--dir", help="Pack this bank instead of the one a fit would use.")
+    pack.add_argument(
+        "--quiet", action="store_true", help="Do not list what was packed."
+    )
 
     status = actions.add_parser(
         "status",
@@ -525,7 +547,42 @@ def run_bank_install(args):
 
     print("\nTemplate bank installed in {}".format(paths.find_bank_dir()))
     print("  sha256 {}".format(manifest["sha256"]))
+
+    if not args.no_pack:
+        # A fit that reads the text files opens a thousand of them, which on a
+        # parallel filesystem is most of a cold run. Doing it here means the
+        # first fit is already fast, and a failure is reported now rather than
+        # silently costing every run a few seconds.
+        from superfit import packed
+
+        if not args.quiet:
+            print("\nPacking the bank so fits open two files instead of a thousand")
+        try:
+            packed.pack(paths.find_bank_dir(), quiet=args.quiet)
+        except (packed.PackError, OSError) as exc:
+            print("  WARNING: could not pack the bank: {}".format(exc))
+            print("  Fits will read the template files directly, just slower.")
+
     print("\nNothing else to set up. Try:\n\n    superfit fit spectrum.flm --z 0.1\n")
+    return 0
+
+
+def run_bank_pack(args):
+    from superfit import packed, paths
+
+    directory = args.dir or paths.find_bank_dir()
+
+    try:
+        indexes = packed.pack(directory, quiet=args.quiet)
+    except (packed.PackError, OSError) as exc:
+        print("Could not pack {}: {}".format(directory, exc))
+        return 1
+
+    print(
+        "Packed {} templates from {} directories.".format(
+            sum(index["n_templates"] for index in indexes), len(indexes)
+        )
+    )
     return 0
 
 
@@ -554,6 +611,23 @@ def run_bank_status(args):
             report["n_sn_types"], report["n_galaxy_templates"]
         )
     )
+
+    pack = report["packed"] or {}
+    if pack.get("packed") and not pack.get("unpacked"):
+        print("  packed:      all {} directories, in {}".format(
+            len(pack["packed"]), pack["root"]))
+    elif pack.get("packed"):
+        print("  packed:      {} of {} directories, in {}".format(
+            len(pack["packed"]),
+            len(pack["packed"]) + len(pack["unpacked"]),
+            pack["root"],
+        ))
+        print("               not packed: {}".format(", ".join(pack["unpacked"])))
+        print("               run `superfit bank pack` to finish")
+    else:
+        print("  packed:      no -- fits read the template text files")
+        print("               `superfit bank pack` takes several seconds off "
+              "every run")
 
     manifest = report["manifest"]
     if manifest:

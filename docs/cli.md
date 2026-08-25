@@ -146,6 +146,7 @@ which `superfit` searches automatically. No environment variable needed.
 | `--overwrite` | Replace an existing installation. |
 | `--no-verify` | Skip the checksum check. |
 | `--quiet` | No progress bars. |
+| `--no-pack` | Skip the packing step below. |
 
 The archive is checked against a checksum pinned in the package, so a
 truncated or substituted download is caught immediately rather than showing
@@ -159,6 +160,39 @@ and point at it:
 superfit bank install --archive /path/to/supyfit_bank.zip
 ```
 
+### `superfit bank pack`
+
+Concatenate each template directory into a single `.npy`, so a fit opens two
+files instead of a thousand.
+
+```bash
+superfit bank pack
+```
+
+`bank install` does this for you. Run it by hand for a bank installed some
+other way — unzipped, copied from a colleague, or pointed at with
+`$SUPERFIT_BANK_DIR` — or after editing templates.
+
+| Flag | Meaning |
+| --- | --- |
+| `--dir PATH` | Pack this bank instead of the one a fit would use. |
+| `--quiet` | Do not list what was packed. |
+
+A fit reads roughly a thousand template files. Parsing them is cheap;
+*opening* them is not, because on a parallel filesystem every open is a round
+trip to a metadata server. Measured on Perlmutter's CFS, the first fit of the
+day spent 10.9 s getting the 10 Å bank off disk, of which 0.67 s was parsing.
+From the pack the same templates arrive in about 40 ms.
+
+The pack goes next to the bank when that directory is writable, so a shared
+bank is packed once for everyone, and in the per-user data directory when it
+is not. It stores the raw float64 each template parses to and nothing derived
+from it, so results are bit-identical either way, and no fit setting — the
+epoch window, the template selection, `mask_galaxy_lines` — can make it stale.
+Only the bank can, and a pack whose directory listing no longer matches is
+ignored in favour of the text. Packing is entirely optional: without it,
+fits read the text files exactly as before.
+
 ### `superfit bank status`
 
 Say which bank a fit would use, where it came from, and whether it is whole.
@@ -168,6 +202,7 @@ $ superfit bank status
 Template bank: /home/you/.local/share/superfit/bank
   located via: found on the search path
   contents:    35 supernova types, 12 galaxy templates
+  packed:      all 8 directories, in /home/you/.local/share/superfit/bank/packed
   installed:   2026-08-24T04:31:07+00:00
   sha256:      42689295b35b77568e9f831925344eea42ebe9c3bdfe61b027df4e8b2c367ce8
 ```

@@ -16,7 +16,13 @@ superfit bank install
 
 `bank install` downloads the 74 MB template bank, checks it against a known
 checksum, and unpacks it into your platform's per-user data directory, which
-`superfit` searches automatically. Nothing else needs setting up.
+`superfit` searches automatically. It then packs the thousand template text
+files into one array per directory, which takes several seconds off every
+subsequent fit. Nothing else needs setting up.
+
+If you already have a bank — unzipped by hand, or shared on a cluster — pack
+it once with `superfit bank pack`. See
+[docs/cli.md](docs/cli.md#superfit-bank-pack).
 
 Check it worked:
 
