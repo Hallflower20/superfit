@@ -18,6 +18,7 @@ from superfit.loggrid import (
     matched_velocity_resolution,
     velocity_to_dlnlam,
 )
+from superfit import paths as paths_module
 from superfit.paths import gal_dir, sne_dir
 
 
@@ -64,21 +65,23 @@ class Parameters:
         # Resolved before anything below reads the bank -- the template lists
         # at the end of this method glob it, and get_metadata walks it.
         #
-        # A named bank is pinned process-wide rather than carried on this
-        # object, because the path helpers every reader goes through
-        # (sne_dir, gal_dir) take no parameters. That matches the constraint
-        # the fit already has: superfit serialises concurrent fits around
-        # _FIT_LOCK, so two banks are not in play at once. Naming no bank
-        # changes nothing and leaves the search path alone.
+        # Resolved onto *this object* and nowhere else. An earlier version
+        # called set_bank_dir() here, which made the choice process-wide, so
+        # constructing a second Superfit moved the bank out from under the
+        # first: `a = Superfit(bank="legacy"); b = Superfit(bank="modern");
+        # a.run()` fitted a against modern's supernovae and legacy's galaxies
+        # and labelled the result "legacy". Every bank-dependent path is now
+        # derived from self.bank_dir, and the process-wide search is only for
+        # a caller that named no bank.
         self.bank = data.get("bank") or ""
         if self.bank:
-            from superfit.paths import bank_dir_for_name, set_bank_dir
-
-            self.bank_dir = set_bank_dir(bank_dir_for_name(self.bank))
+            self.bank_dir = paths_module.bank_dir_for_name(self.bank)
         else:
-            from superfit.paths import find_bank_dir
+            self.bank_dir = paths_module.find_bank_dir()
 
-            self.bank_dir = find_bank_dir()
+        # The phase table belongs to the bank, so it is settled here too
+        # rather than re-resolved from the global by whoever reads it.
+        self.phase_table = paths_module.mjd_max_brightness_csv(self.bank_dir)
 
         self.use_exact_z = data["use_exact_z"]
         self.z_exact = data["z_exact"]
@@ -193,44 +196,29 @@ class Parameters:
 
         # Template library
 
-        if self.resolution == 10 or self.resolution == 30:
-            templates_gal = glob.glob(os.path.join(gal_dir(self.resolution), "*"))
-            templates_gal = [
-                x for x in templates_gal if "CVS" not in x and "README" not in x
-            ]
-            templates_gal = np.array(templates_gal)
+        # Globbed out of self.bank_dir, never out of the process-wide bank.
+        binned = self.resolution if self.resolution in (10, 30) else None
 
-            templates_sn = glob.glob(
-                os.path.join(sne_dir(self.resolution), "**", "**", "*")
-            )
+        templates_gal = glob.glob(
+            os.path.join(gal_dir(binned, self.bank_dir), "*")
+        )
+        templates_gal = [
+            x for x in templates_gal if "CVS" not in x and "README" not in x
+        ]
+        templates_gal = np.array(templates_gal)
 
-            templates_sn = [
-                x
-                for x in templates_sn
-                if "wiserep_spectra.csv" not in x
-                and "info" not in x
-                and "photometry" not in x
-                and "photometry.pdf" not in x
-            ]
-            templates_sn = np.array(templates_sn)
-
-        else:
-            templates_gal = glob.glob(os.path.join(gal_dir(), "*"))
-            templates_gal = [
-                x for x in templates_gal if "CVS" not in x and "README" not in x
-            ]
-            templates_gal = np.array(templates_gal)
-
-            templates_sn = glob.glob(os.path.join(sne_dir(), "**", "**", "*"))
-            templates_sn = [
-                x
-                for x in templates_sn
-                if "wiserep_spectra.csv" not in x
-                and "info" not in x
-                and "photometry" not in x
-                and "photometry.pdf" not in x
-            ]
-            templates_sn = np.array(templates_sn)
+        templates_sn = glob.glob(
+            os.path.join(sne_dir(binned, self.bank_dir), "**", "**", "*")
+        )
+        templates_sn = [
+            x
+            for x in templates_sn
+            if "wiserep_spectra.csv" not in x
+            and "info" not in x
+            and "photometry" not in x
+            and "photometry.pdf" not in x
+        ]
+        templates_sn = np.array(templates_sn)
 
         self.templates_sn_trunc = select_templates(templates_sn, self.temp_sn_tr)
         self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
@@ -260,15 +248,16 @@ class Parameters:
         and parses ~190 CSVs, and two fits that differ only in redshift want
         the same answer.
 
-        The bank directory is part of the key as well as the settings --
-        the scan reads the bank, so pointing at a different one has to
-        invalidate it.
+        This fit's own bank directory and phase table are part of the key as
+        well as the settings: the scan reads both, so two fits against
+        different banks must not share an answer. It used to read the
+        process-wide bank here, which meant the key described whichever bank
+        was resolved last rather than the one this fit is about to use.
         """
 
-        from superfit.paths import find_bank_dir
-
         return (
-            find_bank_dir(),
+            self.bank_dir,
+            self.phase_table,
             tuple(self.temp_sn_tr),
             self.epoch_low,
             self.epoch_high,

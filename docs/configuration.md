@@ -208,8 +208,17 @@ machine resolves to", which is what every fit did when there was only one
 bank. See [docs/cli.md](cli.md#superfit-bank-list).
 
 Which bank produced a classification is part of the result, so the name is
-written into the run's `config.json`. Naming a bank that is not installed
-stops the fit rather than falling back to a different one.
+written into the run's `config.json` — along with `_bank_resolved_dir`,
+`_bank_phase_table` and `_bank_pack_fingerprints`, because a name is a pointer
+and pointers move: re-registering `modern` later would otherwise leave an old
+result claiming a bank it was never fitted against. The underscore-prefixed
+keys are stripped when the file is read back as a config, so it stays reusable
+as input.
+
+Naming a bank that is not installed stops the fit rather than falling back to a
+different one. Each `Superfit` keeps its own bank: constructing a second one
+with a different bank does not disturb the first, so a loop comparing banks
+over the same spectrum is safe.
 
 `temp_sn_tr`, `temp_gal_tr` — which supernova subtypes and host galaxy types
 to consider. Both default to everything in the bank, which is the

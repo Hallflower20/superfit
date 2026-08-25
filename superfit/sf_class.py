@@ -10,10 +10,17 @@ from astropy.table import Table
 
 from superfit.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
 from superfit.config import ConfigError, load_config
-from superfit.Header_Binnings import kill_header, kill_header_and_bin, normalise_flux
+from superfit.Header_Binnings import (
+    bin_spectrum_bank,
+    kill_header,
+    kill_header_and_bin,
+    mask_lines_bank,
+    normalise_flux,
+)
 from superfit.error_routines import linear_error, savitzky_golay
 from superfit.get_metadata import get_metadata
 from superfit.output import FitResult, RunDirectory
+from superfit.packed import load_template
 from superfit.params import Parameters
 from superfit.paths import gal_dir, sne_dir
 from superfit.spectrum import Spectrum
@@ -172,13 +179,51 @@ class Superfit:
 
         return Spectrum.coerce(spectrum, name=name, **(reading or {}))
 
+    def _bank_provenance(self):
+        """Which bank this fit actually read, beyond the name it was given.
+
+        A name is a pointer, and pointers move: `--bank modern` means whatever
+        the registry said at the time, and re-registering that name later
+        leaves an old result claiming a bank it was never fitted against. The
+        resolved directory pins it down, and the pack fingerprints identify
+        the exact template set, so a result can be checked rather than taken
+        on trust.
+        """
+
+        from superfit import packed
+
+        parameters = self.parameters
+        provenance = {
+            "_bank_resolved_dir": parameters.bank_dir,
+            "_bank_phase_table": parameters.phase_table,
+        }
+
+        fingerprints = {}
+        try:
+            for relative in packed.packable_directories(parameters.bank_dir):
+                pack = packed.open_pack(parameters.bank_dir, relative, verify=False)
+                if pack is not None:
+                    fingerprints[relative] = pack.fingerprint
+        except OSError:
+            pass
+
+        if fingerprints:
+            provenance["_bank_pack_fingerprints"] = fingerprints
+
+        return provenance
+
     def _write_used_config(self):
         """Record the effective configuration next to the results."""
 
         used_json = self.output.used_config_json
         try:
             with open(used_json, "w") as handle:
-                json.dump(self.parameters.config, handle, indent=2, default=str)
+                json.dump(
+                    dict(self.parameters.config, **self._bank_provenance()),
+                    handle,
+                    indent=2,
+                    default=str,
+                )
         except OSError as exc:
             # Not being able to write the audit file should not lose the fit.
             print("WARNING: could not write {}: {}".format(used_json, exc))
@@ -384,6 +429,65 @@ class Superfit:
     # would shadow any method of that name anyway; the old one was
     # unreachable and returned itself.
 
+    def _template_as_fitted(self, spec_file):
+        """One supernova template, prepared exactly as the fit prepared it.
+
+        Same bank, same resolution, same masking, same reader. Every one of
+        those used to be able to differ from the fit: the template was read
+        from a hard-coded 10 A directory even when the classification ran at
+        30 A or was binned on the fly, host lines were left in even when the
+        fit masked them out, and the directory came from the process-wide bank
+        rather than this fit's -- so after a second Superfit was constructed
+        the plot could be drawn from a different bank entirely.
+
+        A plot that is not of the model that was scored is worse than no plot:
+        it is a picture of a fit nobody performed.
+        """
+
+        parameters = self.parameters
+        bank_dir = parameters.bank_dir
+        resolution = parameters.resolution
+
+        source_path = self.metadata.dictionary_all_trunc_objects[spec_file]
+        pre_binned = resolution in (10, 30)
+
+        if pre_binned:
+            relative = os.path.relpath(source_path, sne_dir(bank_dir=bank_dir))
+            array = load_template(
+                os.path.join(sne_dir(resolution, bank_dir=bank_dir), relative),
+                "loadtxt",
+                bank_dir=bank_dir,
+            )
+        else:
+            array = load_template(source_path, "kill_header", bank_dir=bank_dir)
+
+        if parameters.mask_galaxy_lines:
+            array = mask_lines_bank(array)
+        if not pre_binned:
+            array = bin_spectrum_bank(array, resolution)
+
+        return np.array(array, dtype=float, copy=True)
+
+    def _galaxy_path(self, galaxy_name):
+        """The galaxy template file behind a GALAXY column entry.
+
+        The column holds a basename; the fit read one of
+        ``parameters.templates_gal_trunc``, which are already resolved against
+        this fit's bank. Matching within that list keeps the plot on the same
+        bank as the fit, rather than rebuilding a path from a global.
+        """
+
+        for candidate in self.parameters.templates_gal_trunc:
+            if os.path.basename(str(candidate)) == str(galaxy_name):
+                return str(candidate)
+
+        raise KeyError(
+            "No galaxy template named {!r} among the {} this fit used; the "
+            "results were produced against a different bank.".format(
+                galaxy_name, len(self.parameters.templates_gal_trunc)
+            )
+        )
+
     def plot_rank(self, j):
         """Plot the ``j``-th ranked match against the observation.
 
@@ -414,15 +518,15 @@ class Superfit:
                 "were produced against a different bank.".format(short_name)
             )
         sn_best_fullname = by_shorthand[str(short_name)]
-        subtype = str(short_name)[: str(short_name).rfind("/")]
 
-        sn_path = os.path.join(sne_dir(10), subtype, sn_best_fullname)
-        hg_path = os.path.join(gal_dir(10), row["GALAXY"])
-
-        nova = kill_header(sn_path)
+        nova = self._template_as_fitted(sn_best_fullname)
         nova[:, 1] = nova[:, 1] / np.nanmedian(nova[:, 1])
 
-        host = np.loadtxt(hg_path)
+        hg_path = self._galaxy_path(row["GALAXY"])
+        host = bin_spectrum_bank(
+            load_template(hg_path, "loadtxt", bank_dir=parameters.bank_dir),
+            parameters.resolution,
+        )
         host[:, 1] = host[:, 1] / np.nanmedian(host[:, 1])
 
         # Reconstruct the model the fitter scored, so the reddening has to
@@ -444,6 +548,10 @@ class Superfit:
         )
         host_nova = bb * nova_int(parameters.lam) + dd * host_int(parameters.lam)
 
+        # short_name is the shorthand label get_metadata builds --
+        # "type/object/instrument phase-band : ..." -- whose separator is a
+        # literal "/" on every platform. Not a filesystem path, so os.path
+        # would be the wrong tool here rather than the right one.
         sn_type = short_name[: short_name.find("/")]
         subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
         phase = str(short_name[short_name.rfind(":") + 1 : -1])

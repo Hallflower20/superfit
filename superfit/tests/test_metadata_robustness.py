@@ -12,6 +12,8 @@ less metadata than the legacy bank had", which the code already had an answer
 for ('u' for an unknown phase). These tests pin that answer down.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -60,6 +62,57 @@ def bank_with(tmp_path, monkeypatch):
         return tmp_path
 
     return build
+
+
+class TestPathsAreNotParsedByHand:
+    """Bank paths are split with os.path, not by searching for separators.
+
+    Two ways that used to go wrong: ``rfind('/')`` finds nothing in a Windows
+    path, and ``path.find('sne')`` finds the wrong place in any path that
+    happens to contain those three letters earlier -- a bank under
+    /home/snelling/, or a user called "sne".
+    """
+
+    def test_an_object_under_a_directory_containing_sne(self, tmp_path, monkeypatch):
+        root = tmp_path / "snelling" / "bank"
+        objdir = root / "original_resolution" / "sne" / "Ia-norm" / "SN2011fe"
+        objdir.mkdir(parents=True)
+        (objdir / "a.ascii").write_text("4000 1.0\n")
+        (objdir / "wiserep_spectra.csv").write_text(WISEREP_HEADER + WISEREP_ROW)
+        table = root / "mjd_of_maximum_brightness.csv"
+        table.write_text(PHASE_TABLE)
+
+        import superfit.get_metadata as gm
+
+        monkeypatch.setattr(
+            gm, "sne_dir", lambda *a, **k: str(root / "original_resolution" / "sne")
+        )
+        monkeypatch.setattr(gm, "mjd_max_brightness_csv", lambda *a, **k: str(table))
+
+        metadata = Metadata(FakeParameters())
+
+        # The type must come out as the directory name, not a slice of the
+        # bank's own path.
+        assert metadata.shorhand_dict["a.ascii"].startswith("Ia-norm/SN2011fe/")
+        assert str(objdir / "a.ascii") == metadata.dictionary_all_trunc_objects[
+            "a.ascii"
+        ]
+
+    def test_the_relative_path_survives_a_bank_containing_sne(self, tmp_path):
+        """What SF_functions does to find a template's pre-binned twin."""
+
+        root = tmp_path / "snelling" / "bank"
+        sne_root = root / "original_resolution" / "sne"
+        source = sne_root / "Ia-norm" / "SN2011fe" / "a.ascii"
+        source.parent.mkdir(parents=True)
+        source.write_text("4000 1.0\n")
+
+        relative = os.path.relpath(str(source), str(sne_root))
+        binned = os.path.join(str(root / "binnings" / "10A" / "sne"), relative)
+
+        assert relative == os.path.join("Ia-norm", "SN2011fe", "a.ascii")
+        assert "snelling" not in relative
+        assert binned.endswith(os.path.join("10A", "sne", relative))
 
 
 class TestAsFloat:

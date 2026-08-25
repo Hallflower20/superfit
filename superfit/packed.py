@@ -41,7 +41,14 @@ PACK_DIRNAME = "packed"
 
 # Bumped when the on-disk layout changes in a way an older reader would get
 # wrong. A pack whose format does not match is ignored, not repaired.
-FORMAT_VERSION = 1
+#
+# 2: the array name carries a generation and the index names it, so
+#    publishing is one atomic rename; the index also records rows/dtype so it
+#    can be checked against the array; and the fingerprint covers mtime as
+#    well as size. A version-1 pack is not stale, it is a different format,
+#    and saying so is what makes `bank status` report "not packed" rather
+#    than implying the bank was edited.
+FORMAT_VERSION = 2
 
 INDEX_SUFFIX = ".index.json"
 
@@ -124,7 +131,7 @@ def packable_directories(bank_dir):
 
 
 def list_templates(directory):
-    """``(relative path, size)`` for every template under ``directory``, sorted.
+    """``(relative path, size, mtime_ns)`` per template under ``directory``, sorted.
 
     ``os.scandir`` rather than ``os.walk``: walking the whole bank with a
     ``stat`` per file takes 1.3 s, and with scandir 0.19 s, because scandir
@@ -144,7 +151,14 @@ def list_templates(directory):
                     stack.append(entry.path)
                 elif is_template(entry.name):
                     relative = os.path.relpath(entry.path, directory)
-                    found.append((relative.replace(os.sep, "/"), entry.stat().st_size))
+                    stat = entry.stat()
+                    found.append(
+                        (
+                            relative.replace(os.sep, "/"),
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                        )
+                    )
 
     found.sort()
     return found
@@ -153,17 +167,24 @@ def list_templates(directory):
 def fingerprint(listing):
     """A digest of a directory listing, used to notice an edited bank.
 
-    Names and sizes, not contents: hashing 30 MB of templates would cost more
-    than the reads the pack exists to avoid, while a template that changed
-    without changing length is not a thing that happens to a published bank
-    by accident. Cheap enough to check on every fit -- the listing it is
-    computed from takes about 40 ms for the supernova bank.
+    Names, sizes and modification times -- not contents. Hashing a gigabyte
+    of templates would cost more than the reads the pack exists to avoid, and
+    this has to be cheap enough to check at every fit boundary. Size alone was
+    not enough: editing a flux value in place usually leaves the byte count
+    exactly as it was, and the stale pack then stayed "valid" while the text
+    said something else. mtime_ns closes that, so the remaining hole is an
+    edit that preserves both length and timestamp, which takes deliberate
+    effort rather than an accident.
+
+    For a bank whose reproducibility has to be provable rather than probable,
+    record its checksum: a pack is only ever as trustworthy as the cheapest
+    check that validates it.
     """
 
     digest = hashlib.sha256()
     digest.update("{}\n".format(FORMAT_VERSION).encode())
-    for relative, size in listing:
-        digest.update("{}\0{}\n".format(relative, size).encode())
+    for relative, size, mtime_ns in listing:
+        digest.update("{}\0{}\0{}\n".format(relative, size, mtime_ns).encode())
     return digest.hexdigest()
 
 
@@ -203,26 +224,85 @@ def _index_path(root, relative_directory):
     return os.path.join(root, relative_directory + INDEX_SUFFIX)
 
 
-def _array_path(root, relative_directory):
-    return os.path.join(root, relative_directory + ".npy")
+def _array_path(root, relative_directory, generation):
+    """Where one *generation* of a packed array lives.
+
+    The array name carries the generation, and the index names the array. That
+    makes the index the single thing that has to change atomically, so a
+    reader either sees the whole old pack or the whole new one.
+
+    Replacing a fixed ``sne.npy`` and then its index was two renames, and a
+    reader arriving between them saw the new array described by the old index
+    -- offsets pointing into different data, which is not a failure that
+    announces itself. It reads as a fit against subtly wrong templates.
+    """
+
+    parent, name = os.path.split(relative_directory)
+    return os.path.join(root, parent, "{}.{}.npy".format(name, generation))
+
+
+def _generation_of(index):
+    """The array name an index refers to, or None for one that names none."""
+
+    array = index.get("array")
+    if not isinstance(array, str) or not array or "/" in array or "\\" in array:
+        return None
+    return array
+
+
+def _sweep_old_generations(root, relative_directory, keep):
+    """Delete arrays for this directory that no index refers to any more.
+
+    On POSIX a reader that has the old array open, or mapped, keeps reading it
+    after the unlink, so this cannot pull the ground out from under a fit in
+    progress. Windows refuses the unlink instead, which is why failure here is
+    ignored: a leftover array costs disk, and nothing else.
+    """
+
+    parent, name = os.path.split(relative_directory)
+    directory = os.path.join(root, parent)
+    prefix = name + "."
+
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return
+
+    for entry in entries:
+        if entry == keep or not entry.startswith(prefix) or not entry.endswith(".npy"):
+            continue
+        try:
+            os.remove(os.path.join(directory, entry))
+        except OSError:
+            pass
 
 
 def _parse_one(args):
-    """Read one template. Module level, so a worker process can pickle it."""
+    """Read one template, and digest its bytes. Module level, so it pickles.
+
+    The digest is of the file exactly as it sits on disk, so `bank verify` can
+    later prove the pack still describes the text rather than merely agreeing
+    with its size and timestamp.
+    """
 
     directory, relative, reader_name = args
+    path = os.path.join(directory, relative)
 
     try:
-        array = np.asarray(
-            READERS[reader_name](os.path.join(directory, relative)), dtype=float
-        )
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+    except OSError as exc:
+        return relative, None, None, "{}: {}".format(type(exc).__name__, exc)
+
+    try:
+        array = np.asarray(READERS[reader_name](path), dtype=float)
     except Exception as exc:  # noqa: BLE001 -- any parse failure is the same answer
-        return relative, None, "{}: {}".format(type(exc).__name__, exc)
+        return relative, None, None, "{}: {}".format(type(exc).__name__, exc)
 
     if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] < 2:
-        return relative, None, "not a 2-column spectrum"
+        return relative, None, None, "not a 2-column spectrum"
 
-    return relative, array, None
+    return relative, array, digest, None
 
 
 def resolve_pack_jobs(requested):
@@ -255,7 +335,7 @@ def _parse_all(directory, listing, reader_name, jobs, quiet):
     unless asked.
     """
 
-    work = [(directory, relative, reader_name) for relative, _size in listing]
+    work = [(directory, entry[0], reader_name) for entry in listing]
 
     if jobs > 1 and len(work) > jobs:
         import multiprocessing as mp
@@ -301,8 +381,9 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True, jobs=Non
     names = []
     arrays = []
     skipped = []
+    content = hashlib.sha256()
 
-    for relative, array, why in _parse_all(
+    for relative, array, digest, why in _parse_all(
         directory, listing, reader_name, resolve_pack_jobs(jobs), quiet
     ):
         if array is None:
@@ -310,6 +391,9 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True, jobs=Non
         else:
             names.append(relative)
             arrays.append(array)
+            # In listing order, which _parse_all preserves, so the digest is
+            # reproducible rather than dependent on which worker finished first.
+            content.update("{}\0{}\n".format(relative, digest).encode())
 
     if not arrays:
         raise PackError("No readable templates in {}".format(directory))
@@ -334,20 +418,36 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True, jobs=Non
         packed[start:stop, : array.shape[1]] = array
         arrays[i] = None
 
+    digest = fingerprint(listing)
+
+    # The generation names the array file, so publishing a new pack never
+    # writes over the array an existing reader is holding. Derived from the
+    # fingerprint, so packing the same unchanged directory twice is idempotent.
+    generation = digest[:16]
+
     index = {
         "format": FORMAT_VERSION,
         "directory": relative_directory.replace(os.sep, "/"),
         "reader": reader_name,
-        "fingerprint": fingerprint(listing),
+        "fingerprint": digest,
+        # sha256 over the bytes of every template that went in. Not checked on
+        # the hot path -- that would mean re-reading the whole bank, which is
+        # the cost the pack exists to remove -- but `superfit bank verify`
+        # recomputes it, which is how a pack's agreement with the text becomes
+        # provable rather than probable.
+        "content": content.hexdigest(),
+        "array": os.path.basename(_array_path(root, relative_directory, generation)),
         "n_templates": len(names),
         "width": width,
+        "rows": int(offsets[-1]),
+        "dtype": "float64",
         "names": names,
         "offsets": [int(x) for x in offsets],
         "widths": widths,
         "skipped": [name for name, _why in skipped],
     }
 
-    array_path = _array_path(root, relative_directory)
+    array_path = _array_path(root, relative_directory, generation)
     index_path = _index_path(root, relative_directory)
     os.makedirs(os.path.dirname(array_path), exist_ok=True)
 
@@ -359,12 +459,16 @@ def pack_directory(bank_dir, relative_directory, root=None, quiet=True, jobs=Non
         with open(staged_index, "w") as handle:
             json.dump(index, handle)
 
-        # The array goes first: a reader checks for the index and would
-        # otherwise find one pointing at an array that is not there yet.
+        # The array lands under a name nothing refers to yet, so it is
+        # complete and fsynced before any index points at it. Replacing the
+        # index is then the one step that publishes the new generation, and it
+        # is a single atomic rename.
         os.replace(staged_array, array_path)
         os.replace(staged_index, index_path)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+    _sweep_old_generations(root, relative_directory, os.path.basename(array_path))
 
     if not quiet:
         print(
@@ -419,38 +523,220 @@ def pack(bank_dir=None, root=None, quiet=True, jobs=None, only=None):
     ]
 
 
+def verify(bank_dir=None, quiet=True, jobs=None):
+    """Re-read a bank's text and prove each pack still describes it.
+
+    The per-fit check compares names, sizes and modification times, which is
+    cheap enough to run at every fit boundary and catches every edit that
+    changes any of the three. What it cannot catch is an edit that lands
+    inside the filesystem's timestamp granularity of the pack being built --
+    /tmp resolves mtime to about 8 ms, so two writes in one tick share a
+    timestamp.
+
+    This closes that by rehashing every template. It costs a full read of the
+    bank, which is exactly what the pack exists to avoid, so it is a command
+    someone runs rather than something a fit does.
+
+    Returns ``[(relative_directory, ok, detail), ...]``.
+    """
+
+    if bank_dir is None:
+        from superfit.paths import find_bank_dir
+
+        bank_dir = find_bank_dir()
+
+    results = []
+
+    for relative in packable_directories(bank_dir):
+        index = None
+        for root in pack_roots(bank_dir):
+            try:
+                with open(_index_path(root, relative)) as handle:
+                    index = json.load(handle)
+                break
+            except (OSError, ValueError):
+                continue
+
+        if index is None:
+            results.append((relative, None, "not packed"))
+            continue
+
+        recorded = index.get("content")
+        if not recorded:
+            results.append(
+                (relative, None, "packed before content digests were recorded")
+            )
+            continue
+
+        directory = os.path.join(bank_dir, relative)
+        reader_name = index.get("reader", reader_name_for(relative))
+        listing = list_templates(directory)
+
+        content = hashlib.sha256()
+        for name, _array, digest, why in _parse_all(
+            directory, listing, reader_name, resolve_pack_jobs(jobs), quiet
+        ):
+            if why is None:
+                content.update("{}\0{}\n".format(name, digest).encode())
+
+        ok = content.hexdigest() == recorded
+        results.append(
+            (
+                relative,
+                ok,
+                "matches the text" if ok else "DOES NOT match the text -- repack",
+            )
+        )
+
+    return results
+
+
+class PackUnusable(Exception):
+    """Internal: this pack cannot be trusted, so read the text instead."""
+
+
+def _check_index(index):
+    """The spans an index describes, or raise PackUnusable.
+
+    Everything the index claims is checked against everything else it claims,
+    before any of it is used to slice an array. An index that disagrees with
+    itself -- offsets that run backwards, a name count that does not match the
+    offset count, a width wider than the array -- would otherwise hand back a
+    slice of some other template, which is the one failure mode a fit cannot
+    detect for itself.
+    """
+
+    try:
+        names = index["names"]
+        offsets = index["offsets"]
+        widths = index["widths"]
+        width = int(index["width"])
+        rows = int(index["rows"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PackUnusable("index is missing fields: {}".format(exc))
+
+    if not isinstance(names, list) or not isinstance(offsets, list):
+        raise PackUnusable("index names/offsets are not lists")
+    if len(offsets) != len(names) + 1 or len(widths) != len(names):
+        raise PackUnusable(
+            "index describes {} names, {} offsets and {} widths".format(
+                len(names), len(offsets), len(widths)
+            )
+        )
+    if not names:
+        raise PackUnusable("index describes no templates")
+    if offsets[0] != 0 or offsets[-1] != rows:
+        raise PackUnusable("index offsets do not span 0..rows")
+    if any(b < a for a, b in zip(offsets, offsets[1:])):
+        raise PackUnusable("index offsets are not monotonic")
+    if any(not 0 < w <= width for w in widths):
+        raise PackUnusable("index has a width outside 1..{}".format(width))
+
+    return {
+        name: (int(start), int(stop), int(w))
+        for name, start, stop, w in zip(names, offsets[:-1], offsets[1:], widths)
+    }
+
+
+def _open_array(array_path, index):
+    """Memory-map a packed array, checking it is the one the index describes.
+
+    A truncated or corrupt array is the case that used to escape: the index
+    parsed, so the pack looked usable, and the failure surfaced from inside
+    np.load or from slicing -- in the middle of a fit, as a traceback, with
+    the text sitting right there unread. Checked here so the caller can fall
+    back instead.
+    """
+
+    try:
+        array = np.load(array_path, mmap_mode="r")
+    except Exception as exc:  # noqa: BLE001 -- a bad header raises many things
+        raise PackUnusable("array will not open: {}".format(exc))
+
+    expected = (int(index["rows"]), int(index["width"]))
+    if array.shape != expected:
+        raise PackUnusable(
+            "array is {} but the index describes {}".format(array.shape, expected)
+        )
+    if array.dtype != np.float64:
+        raise PackUnusable("array is {}, not float64".format(array.dtype))
+
+    # np.load trusts the header's shape; a file cut short after it was written
+    # then faults on access rather than on open, and a SIGBUS from a mapped
+    # page is not something a fit can catch. Compare the size on disk instead.
+    try:
+        on_disk = os.path.getsize(array_path)
+    except OSError as exc:
+        raise PackUnusable("array cannot be stat'd: {}".format(exc))
+    if on_disk < array.nbytes:
+        raise PackUnusable(
+            "array is truncated: {} bytes on disk, {} needed".format(
+                on_disk, array.nbytes
+            )
+        )
+
+    return array
+
+
 class _Pack:
     """One packed directory, opened for reading."""
 
-    def __init__(self, array_path, index):
-        self._array_path = array_path
-        self._array = None
+    def __init__(self, array_path, index, source_directory):
         self.reader = index["reader"]
         self.fingerprint = index["fingerprint"]
-        self._span = {
-            name: (int(start), int(stop), int(w))
-            for name, start, stop, w in zip(
-                index["names"], index["offsets"][:-1], index["offsets"][1:],
-                index["widths"],
-            )
-        }
+        self.source_directory = source_directory
+        self._array_path = array_path
+        self._index = index
+        self._span = _check_index(index)
+        self._array = None
+        # Cleared at each fit boundary; see stale().
+        self._revalidate = False
+
+    def _mapped(self):
+        if self._array is None:
+            self._array = _open_array(self._array_path, self._index)
+        return self._array
 
     def get(self, relative):
+        """One template, or None if this pack does not hold it.
+
+        Raises PackUnusable rather than anything else, so a caller has exactly
+        one thing to catch to fall back to the text.
+        """
+
         span = self._span.get(relative)
         if span is None:
             return None
 
-        if self._array is None:
-            # Memory-mapped, so opening the 10 A supernova pack touches the
-            # header and nothing else; the pages come in as templates are
-            # sliced out of it.
-            self._array = np.load(self._array_path, mmap_mode="r")
-
         start, stop, width = span
-        # A copy, not a view onto the map: callers mask and bin these in
-        # place, and a fit must not be able to write through to the pack --
-        # nor to keep the whole mapping alive by holding one template.
-        return np.array(self._array[start:stop, :width], dtype=np.float64)
+        array = self._mapped()
+
+        try:
+            # A copy, not a view onto the map: callers mask and bin these in
+            # place, and a fit must not be able to write through to the pack
+            # -- nor keep the whole mapping alive by holding one template.
+            return np.array(array[start:stop, :width], dtype=np.float64)
+        except Exception as exc:  # noqa: BLE001 -- a bad map raises many things
+            raise PackUnusable("reading {}: {}".format(relative, exc))
+
+    def stale(self):
+        """Whether the source directory has changed since this was opened.
+
+        Checked at most once per fit boundary, not per template: re-listing
+        the largest bank's supernova directory is about 1.8 s, which is worth
+        paying once against 77 s of reading text, and not worth paying 15000
+        times.
+        """
+
+        if not self._revalidate:
+            return False
+        self._revalidate = False
+
+        try:
+            current = fingerprint(list_templates(self.source_directory))
+        except OSError:
+            return True
+        return current != self.fingerprint
 
 
 def open_pack(bank_dir, relative_directory, verify=True):
@@ -459,11 +745,16 @@ def open_pack(bank_dir, relative_directory, verify=True):
     ``verify`` re-lists the source directory and compares the fingerprint, so
     a bank edited since it was packed falls back to the text instead of being
     fitted against a stale copy.
+
+    Returns None for every way a pack can be unusable -- absent, stale,
+    corrupt, self-contradictory, truncated. None of them is an error worth
+    raising: the text is still there.
     """
+
+    source = os.path.join(bank_dir, relative_directory)
 
     for root in pack_roots(bank_dir):
         index_path = _index_path(root, relative_directory)
-        array_path = _array_path(root, relative_directory)
 
         try:
             with open(index_path) as handle:
@@ -471,11 +762,19 @@ def open_pack(bank_dir, relative_directory, verify=True):
         except (OSError, ValueError):
             continue
 
-        if index.get("format") != FORMAT_VERSION or not os.path.isfile(array_path):
+        if not isinstance(index, dict) or index.get("format") != FORMAT_VERSION:
+            continue
+
+        array_name = _generation_of(index)
+        if array_name is None:
+            continue
+
+        parent = os.path.dirname(_index_path(root, relative_directory))
+        array_path = os.path.join(parent, array_name)
+        if not os.path.isfile(array_path):
             continue
 
         if verify:
-            source = os.path.join(bank_dir, relative_directory)
             try:
                 current = fingerprint(list_templates(source))
             except OSError:
@@ -484,8 +783,12 @@ def open_pack(bank_dir, relative_directory, verify=True):
                 continue
 
         try:
-            return _Pack(array_path, index)
-        except (KeyError, TypeError, ValueError):
+            pack = _Pack(array_path, index, source)
+            # Map it now rather than on first use, so a corrupt array is one
+            # more reason to fall back here instead of a surprise later.
+            pack._mapped()
+            return pack
+        except (PackUnusable, KeyError, TypeError, ValueError):
             continue
 
     return None
@@ -505,15 +808,21 @@ _open_packs = {}
 _packable = {}
 
 
-def _pack_for(path):
-    """The pack covering ``path``, and the path relative to its directory."""
+def _pack_for(path, bank_dir=None):
+    """The pack covering ``path``, and the path relative to its directory.
 
-    from superfit.paths import find_bank_dir
+    ``bank_dir`` is the bank the caller is fitting against. A fit always
+    passes its own: resolving the process-wide bank here would let a second
+    Superfit's construction decide which pack this fit reads.
+    """
 
-    try:
-        bank_dir = find_bank_dir()
-    except FileNotFoundError:
-        return None, None
+    if bank_dir is None:
+        from superfit.paths import find_bank_dir
+
+        try:
+            bank_dir = find_bank_dir()
+        except FileNotFoundError:
+            return None, None
 
     absolute = os.path.abspath(path)
     relative_to_bank = os.path.relpath(absolute, bank_dir)
@@ -537,10 +846,39 @@ def _pack_for(path):
             _open_packs[key] = open_pack(bank_dir, relative_directory)
 
         pack_for_dir = _open_packs[key]
+
+        # Marked for revalidation by begin_fit(). A bank edited between two
+        # fits in one process must not be read out of the pack built before
+        # the edit; the cache used to hold the first fit's answer for the life
+        # of the process, so only a caller that knew to clear it saw the edit.
+        if pack_for_dir is not None and pack_for_dir.stale():
+            pack_for_dir = open_pack(bank_dir, relative_directory)
+            _open_packs[key] = pack_for_dir
+
         if pack_for_dir is not None:
             return pack_for_dir, "/".join(parts[depth:])
 
     return None, None
+
+
+def begin_fit():
+    """Mark every open pack for one revalidation against its source.
+
+    Called at the start of a fit. The check itself is deferred to the next
+    lookup and happens at most once per pack per fit, so a fit that reads
+    15000 templates pays for one directory listing rather than 15000.
+    """
+
+    for pack in _open_packs.values():
+        if pack is not None:
+            pack._revalidate = True
+
+    # A pack that was absent last time may have been built since, and the set
+    # of packable directories can grow when a binning is added.
+    for key, pack in list(_open_packs.items()):
+        if pack is None:
+            del _open_packs[key]
+    _packable.clear()
 
 
 def forget_open_packs():
@@ -554,20 +892,33 @@ def forget_open_packs():
     _packable.clear()
 
 
-def load_template(path, reader="loadtxt"):
+def load_template(path, reader="loadtxt", bank_dir=None):
     """One bank template, from the pack when there is a usable one.
 
     ``reader`` names how the caller would read the text, and a pack built by
     a different reader is not used: the point of the pack is to hand back
     exactly what the caller would have parsed, and two readers do not always
-    agree about a file. Falls back to reading the text for any reason at all
-    -- no pack, a stale one, a template added since it was built.
+    agree about a file.
+
+    ``bank_dir`` is the bank to look in, and a fit always passes its own.
+
+    Falls back to reading the text for every reason a pack can fail -- absent,
+    stale, corrupt, truncated, a template added since it was built. The pack
+    is an optimisation, so a broken one costs time and never an answer.
     """
 
-    pack_for_dir, relative = _pack_for(path)
+    pack_for_dir, relative = _pack_for(path, bank_dir)
 
     if pack_for_dir is not None and pack_for_dir.reader == reader:
-        array = pack_for_dir.get(relative)
+        try:
+            array = pack_for_dir.get(relative)
+        except PackUnusable:
+            # Poison it for the rest of this fit rather than retrying a broken
+            # map 15000 times, then read the text.
+            for key, value in list(_open_packs.items()):
+                if value is pack_for_dir:
+                    _open_packs[key] = None
+            array = None
         if array is not None:
             return array
 

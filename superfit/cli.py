@@ -311,6 +311,21 @@ def _add_bank_parser(subparsers):
         "--quiet", action="store_true", help="Do not list what was packed."
     )
 
+    verify = actions.add_parser(
+        "verify",
+        help="prove a pack still describes the bank's text",
+        description="Re-read every template and compare against the digest "
+        "recorded when the bank was packed. A fit checks names, sizes and "
+        "modification times, which is cheap; this checks the bytes, which "
+        "costs a full read of the bank. Use it when a result has to be "
+        "provably reproducible.",
+    )
+    verify.set_defaults(handler=run_bank_verify)
+    verify.add_argument("--dir", help="Verify this bank instead of the default.")
+    verify.add_argument("--bank", help="Verify the bank with this name.")
+    verify.add_argument("--jobs", type=int, metavar="N", help="Processes to read with.")
+    verify.add_argument("--quiet", action="store_true", help="No progress bars.")
+
     listing = actions.add_parser(
         "list",
         help="list the template banks superfit knows about",
@@ -710,6 +725,30 @@ def run_bank_pack(args):
             sum(index["n_templates"] for index in indexes), len(indexes)
         )
     )
+    return 0
+
+
+def run_bank_verify(args):
+    from superfit import packed
+
+    directory = _bank_directory(args)
+    print("Verifying {} against its packs\n".format(directory))
+
+    results = packed.verify(directory, quiet=args.quiet, jobs=args.jobs)
+
+    failed = False
+    for relative, ok, detail in results:
+        mark = "ok  " if ok else ("--  " if ok is None else "FAIL")
+        if ok is False:
+            failed = True
+        print("  [{}] {:<28} {}".format(mark, relative, detail))
+
+    if failed:
+        print("\nAt least one pack no longer matches the text it was built "
+              "from. Rebuild with `superfit bank pack`.")
+        return 1
+
+    print("\nEvery pack matches the text it was built from.")
     return 0
 
 

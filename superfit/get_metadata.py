@@ -29,28 +29,34 @@ def _as_float(value):
     return None if np.isnan(number) else number
 
 def list_folders(path):
-    if path[-1] != '/':
-        path=path+'/'
+    """Immediate subdirectories of ``path``.
 
-    folders=[]
-    dirs=glob.glob(path+'*')
-    for dir in dirs:
-        if os.path.isdir(dir):
-            folders.append(dir)
+    Built with os.path.join rather than by appending "/" to the string: on
+    Windows the separator is a backslash, and a path assembled by hand is one
+    the rest of this module then fails to split apart again.
+    """
 
-    return folders
+    return sorted(
+        entry
+        for entry in glob.glob(os.path.join(path, "*"))
+        if os.path.isdir(entry)
+    )
 
 class Metadata(object):
 
     def __init__(self, parameters):
 
-        # The bank's own phase table when it carries one. A bank built
-        # somewhere else knows its own objects; the copy inside the package
-        # only knows the 189 the legacy bank was built from. Resolved here
-        # rather than imported at module load so that selecting a bank
-        # selects its phase table with it -- which callers used to have to
-        # arrange by assigning over this module's globals.
-        mjd_max_brightness = mjd_max_brightness_csv()
+        # This fit's bank, and this fit's phase table -- both settled by
+        # Parameters, not looked up from process-wide state that another
+        # Superfit's construction may since have moved. A bank built
+        # elsewhere knows its own objects; the copy inside the package only
+        # knows the 189 the legacy bank was built from.
+        bank_dir = getattr(parameters, "bank_dir", None)
+        mjd_max_brightness = getattr(parameters, "phase_table", None)
+        if mjd_max_brightness is None:
+            mjd_max_brightness = mjd_max_brightness_csv(bank_dir)
+
+        sne_root = sne_dir(bank_dir=bank_dir)
 
 
 
@@ -66,7 +72,7 @@ class Metadata(object):
 
 
 
-        folders = [os.path.join(sne_dir(), x) for x in parameters.temp_sn_tr]
+        folders = [os.path.join(sne_root, x) for x in parameters.temp_sn_tr]
         have_wiserep=[]
         no_wiserep=[]
         z_dic={}
@@ -85,18 +91,20 @@ class Metadata(object):
             subs=list_folders(folder)
             for sub in subs:
                 subpath=sub
-                idx=subpath.rfind('/')
-                sub=subpath[(idx+1):]
+                # basename/dirname rather than rfind('/'): the bank lives
+                # under a Windows path as readily as a POSIX one, and there
+                # the separator these used to search for never appears.
+                sub=os.path.basename(subpath)
                 subfolders.append(subpath)
-                idx2=subpath[0:idx].rfind('/')
-                sn_type=subpath[idx2+1:idx]
+                sn_type=os.path.basename(os.path.dirname(subpath))
                 Type_dic[sub]=sn_type
-                if os.path.exists(subpath+'/wiserep_spectra.csv'):
+                wiserep_csv=os.path.join(subpath, 'wiserep_spectra.csv')
+                if os.path.exists(wiserep_csv):
                     have_wiserep.append(subpath)
                     # pandas parses these ~190 files about 5x faster than
                     # astropy.io.ascii, which was the single largest cost in
                     # building the metadata.
-                    wise=pd.read_csv(subpath+'/wiserep_spectra.csv')
+                    wise=pd.read_csv(wiserep_csv)
 
                     # A header with no rows is a bank saying "no spectra
                     # survived curation for this object", which is a
@@ -152,7 +160,7 @@ class Metadata(object):
 
                             short_path_dict[shorhand_dict[spec_file]]=spec_file
 
-                            dictionary_all_trunc_objects[spec_file] = os.path.join(sne_dir(), sn_type, sub, spec_file)
+                            dictionary_all_trunc_objects[spec_file] = os.path.join(sne_root, sn_type, sub, spec_file)
 
 
 
@@ -166,7 +174,7 @@ class Metadata(object):
 
                                 short_path_dict[shorhand_dict[spec_file]]=spec_file
 
-                                dictionary_all_trunc_objects[spec_file] = os.path.join(sne_dir(), sn_type, sub, spec_file)
+                                dictionary_all_trunc_objects[spec_file] = os.path.join(sne_root, sn_type, sub, spec_file)
 
 
 

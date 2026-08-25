@@ -16,11 +16,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.9", "3.11", "3.13"]
+        include:
+          # The bank is addressed by path throughout, and several places used
+          # to split those paths on "/" by hand -- which is not the separator
+          # on Windows, so a bank there was read as one undivided name. One
+          # Windows job is what keeps that from coming back; a full matrix
+          # there buys little, since what differs is the path handling rather
+          # than the Python.
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
 
     steps:
       - uses: actions/checkout@v4

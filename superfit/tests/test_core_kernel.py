@@ -291,7 +291,17 @@ class TestSolveGrid:
         assert (chi2[np.isfinite(chi2)] >= 0).all()
 
     def test_perfect_fit_scores_zero(self):
-        """An observation built exactly from one pair must score ~0 there."""
+        """An observation built exactly from one pair must score ~0 there.
+
+        "Zero" has to be measured against the size of the terms it cancels
+        between, not against a fixed epsilon. solve_grid evaluates chi2 as a
+        difference of six weighted sums, each of order sum(w * obj**2) -- about
+        1.5e6 here, since sigma is 0.01 over 150 pixels -- so float64 leaves a
+        residue around 1e-10 and the exact value depends on the order BLAS
+        accumulated in. An absolute `< 1e-12` held on Linux and failed on
+        Windows and macOS at ~1.3e-9, which is a difference between BLAS
+        builds rather than a difference in the answer.
+        """
 
         n_lam = 150
         rng = np.random.default_rng(3)
@@ -302,7 +312,9 @@ class TestSolveGrid:
 
         b, d, chi2, _ = solve_grid(sn, gal, obj, sigma)
 
-        assert chi2[1, 2] < 1e-12
+        # The scale the cancellation happens at: chi2's leading term.
+        scale = float(np.sum(obj**2 / sigma**2))
+        assert chi2[1, 2] < 1e-12 * scale
         np.testing.assert_allclose(b[1, 2], 0.8, rtol=1e-9)
         np.testing.assert_allclose(d[1, 2], 0.5, rtol=1e-9)
 
