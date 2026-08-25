@@ -170,13 +170,18 @@ class RedshiftableTemplates:
     def __len__(self):
         return self.values.shape[0]
 
-    def at_redshift(self, z):
-        """Every template redshifted to ``z``, sampled on the observed grid.
+    def at_redshift(self, z, rows=None):
+        """Templates redshifted to ``z``, sampled on the observed grid.
 
         Returns (n_templates, len(observed_grid)). The flux is *not* divided
         by (1 + z) and carries no extinction; both are cheap multiplies the
         caller applies, and keeping them out means this result can be reused
         across a whole extinction grid.
+
+        ``rows`` is an optional ``slice`` selecting which templates to shift.
+        A worker handling one block of a 15561-template bank has no use for
+        the other 14500, and shifting them anyway is the largest single piece
+        of duplicated memory traffic in a scan.
         """
 
         shift = self.observed_grid.shift_bins(z)
@@ -195,8 +200,10 @@ class RedshiftableTemplates:
                 "was built for z up to about {:.3f}".format(z, self.max_redshift)
             )
 
-        left = self.values[:, base - 1 : base - 1 + n]
-        right = self.values[:, base : base + n]
+        block = self.values if rows is None else self.values[rows]
+
+        left = block[:, base - 1 : base - 1 + n]
+        right = block[:, base : base + n]
 
         return frac * left + (1.0 - frac) * right
 

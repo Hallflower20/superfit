@@ -298,6 +298,128 @@ def solve_grid(sn, gal, int_obj, sigma, weighted=False):
     return b, d, chi2, times
 
 
+def solve_extinction_batch(sn, gal, int_obj, sigma, reddening, weighted=False):
+    """Score every (extinction, galaxy, supernova) triple in one pass.
+
+    :func:`solve_grid` does one extinction at a time, and doing that for a
+    whole A_v grid repeats work that does not depend on A_v at all. Of the six
+    weighted contractions the chi2 is built from, only three move with
+    extinction -- ``t_os``, ``t_ss`` and ``t_sg``. ``times``, ``t_oo``,
+    ``t_og`` and ``t_gg`` do not, because reddening is finite and positive
+    everywhere, so it changes no template's coverage: the validity masks, the
+    weights, and every contraction that does not touch the supernova flux are
+    identical across the grid. The unweighted amplitude solve adds one more
+    that does move (``n_gs``) and two that do not.
+
+    So the A_v-independent halves are computed once, and each A_v-dependent
+    contraction becomes a single matrix product with the extinction axis
+    folded into its rows: stacking (n_av, n_gal, n_lam) into
+    (n_av * n_gal, n_lam) turns twenty-one modest products into one large one.
+
+    Parameters
+    ----------
+    sn : (n_sn, n_lam) array
+        Templates at this redshift, *without* extinction applied.
+    gal : (n_gal, n_lam) array
+    int_obj, sigma : (n_lam,) arrays
+    reddening : (n_av, n_lam) array
+        The transmission for each A_v, ``10 ** (-0.4 * A_v * A_lambda)``.
+    weighted : bool
+        As in :func:`solve_grid`.
+
+    Returns
+    -------
+    b, d, chi2, times : (n_av, n_gal, n_sn) arrays
+
+    Agrees with :func:`solve_grid` applied one extinction at a time to about
+    1e-14 relative, which is the reassociation of the same sums rather than a
+    different calculation.
+    """
+
+    S = np.ascontiguousarray(sn, dtype=np.float64)
+    G = np.ascontiguousarray(gal, dtype=np.float64)
+    obj = np.asarray(int_obj, dtype=np.float64)
+    sig = np.asarray(sigma, dtype=np.float64)
+    red = np.ascontiguousarray(reddening, dtype=np.float64)
+
+    n_av = red.shape[0]
+    n_gal = G.shape[0]
+    n_sn = S.shape[0]
+
+    mS = np.isfinite(S)
+    mG = np.isfinite(G)
+    m_obj = np.isfinite(obj)
+
+    S0 = np.where(mS, S, 0.0)
+    G0 = np.where(mG, G, 0.0)
+    obj0 = np.where(m_obj, obj, 0.0)
+
+    valid_obs = m_obj & np.isfinite(sig)
+
+    A = (mS & valid_obs).astype(np.float64)
+    B = (mG & valid_obs).astype(np.float64)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(valid_obs, 1.0 / sig**2, 0.0)
+
+    SA = S0 * A
+    GB = G0 * B
+
+    # --- independent of A_v: once, then broadcast --------------------------
+    times_2d = B @ A.T
+    t_oo = ((B * (w * obj0 * obj0)) @ A.T)[np.newaxis, :, :]
+    t_og = ((GB * (w * obj0)) @ A.T)[np.newaxis, :, :]
+    t_gg = ((GB * GB * w) @ A.T)[np.newaxis, :, :]
+
+    # --- moves with A_v: one stacked product each --------------------------
+    def stacked(rows, scale):
+        return (rows[np.newaxis, :, :] * scale[:, np.newaxis, :]).reshape(
+            n_av * n_gal, -1
+        )
+
+    shape = (n_av, n_gal, n_sn)
+    t_os = (stacked(B, red) @ (SA * (w * obj0)).T).reshape(shape)
+    t_ss = (stacked(B, red * red) @ (SA * SA * w).T).reshape(shape)
+    t_sg = (stacked(GB * w, red) @ SA.T).reshape(shape)
+
+    if weighted:
+        n_ss, n_gg, n_gs, n_so, n_go = t_ss, t_gg, t_sg, t_os, t_og
+    else:
+        # The historical unweighted solve; see solve_grid for why it is the
+        # default. sum(sn^2) again runs over the supernova's own coverage.
+        n_ss = ((red * red) @ (S0 * S0).T)[:, np.newaxis, :]
+        n_gg = (G0 * G0).sum(axis=1)[np.newaxis, :, np.newaxis]
+        n_gs = (stacked(G0, red) @ S0.T).reshape(shape)
+        n_so = ((red * obj0) @ S0.T)[:, np.newaxis, :]
+        n_go = (G0 @ obj0)[np.newaxis, :, np.newaxis]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        c = 1.0 / (n_ss * n_gg - n_gs**2)
+        b = c * (n_gg * n_so - n_gs * n_go)
+        d = c * (n_ss * n_go - n_gs * n_so)
+
+    b = np.where(b < 0, np.nan, b)
+    d = np.where(d < 0, np.nan, d)
+
+    with np.errstate(invalid="ignore"):
+        chi2 = (
+            t_oo
+            - 2.0 * b * t_os
+            - 2.0 * d * t_og
+            + b**2 * t_ss
+            + 2.0 * b * d * t_sg
+            + d**2 * t_gg
+        )
+
+    chi2 = np.where(chi2 < 0, 0.0, chi2)
+
+    rejected = ~np.isfinite(b) | ~np.isfinite(d)
+    times = np.where(rejected, 0.0, np.broadcast_to(times_2d, shape))
+    chi2 = np.where(rejected, 0.0, chi2)
+
+    return b, d, chi2, times
+
+
 def core(
     int_obj,
     z,
@@ -507,50 +629,142 @@ def _init_worker(state):
     _SHARED_STATE = state
 
 
-def _fit_one_grid_point(args):
-    """Fit the bank at one redshift, across a group of extinction values.
+# Supernova templates scored at once inside a worker. The batched kernel holds
+# arrays of (n_av, n_gal, block), so the block is what bounds a worker's
+# memory: 21 x 128 x 2048 float64 is 44 MB per term and there are a handful of
+# terms live at once. Blocking is also what keeps the products large without
+# letting the score arrays grow with the whole bank -- 21 x 128 x 15561 would
+# be 335 MB per term, several times over.
+DEFAULT_SN_BLOCK = 2048
 
-    The redshift shift is shared by the whole bank and does not depend on
-    A_v, so it is done once here and reused across the group. That is what
-    log binning buys: on a linear grid this step was a per-template
-    interpolation repeated for every extinction value.
+
+def _top_k_per_extinction(reduchi2, k, sn_offset, n_sn_total):
+    """Indices and values of the ``k`` smallest scores, per extinction.
+
+    ``argpartition`` rather than a full sort: only ``k`` of these are ever
+    looked at -- ten, by default -- and sorting the rest is the dominant cost
+    once the bank is large. A full argsort of the 128 x 12316 scores the modern
+    bank produces is 64 ms, which over a 21-point A_v grid is 1.3 s spent
+    ordering candidates nobody reads; taking the top ten costs 6 ms.
+
+    Ranks are returned as flat indices into the *whole* (n_gal, n_sn) grid, so
+    a caller can merge blocks without knowing how the work was split. Ties are
+    broken by that index, which makes the ordering independent of block size
+    and of how the partition happened to land -- a full argsort left it to
+    whatever quicksort did.
     """
 
-    z, extinctions = args
+    n_av, n_gal, n_block = reduchi2.shape
+    flat = reduchi2.reshape(n_av, n_gal * n_block)
+    take = min(k, flat.shape[1])
+
+    # Column index within the block, mapped back to the full grid.
+    local = np.argpartition(flat, take - 1, axis=1)[:, :take]
+    values = np.take_along_axis(flat, local, axis=1)
+
+    gal_index = local // n_block
+    sn_index = local % n_block + sn_offset
+    global_flat = gal_index * n_sn_total + sn_index
+
+    # Sort the k candidates by (value, index). lexsort takes its last key as
+    # the primary one and sorts along the last axis, so this is "by score,
+    # ties by position". The tiebreak is what makes the ordering reproducible:
+    # without it, equal scores would be ordered by wherever argpartition
+    # happened to leave them, which depends on the block size.
+    order = np.lexsort((global_flat, values))
+    values = np.take_along_axis(values, order, axis=1)
+    global_flat = np.take_along_axis(global_flat, order, axis=1)
+
+    return global_flat, values
+
+
+def _fit_one_block(args):
+    """Score one block of supernova templates, at one redshift, for every A_v.
+
+    Returns per-extinction candidate records rather than a table: numeric
+    indices and numbers, which pickle cheaply and cost nothing to merge.
+    Building an Astropy table here meant one per grid point, validated and
+    type-converted thirteen columns at a time, and then thrown at vstack.
+    """
+
+    z, rows = args
     state = _SHARED_STATE
 
     lam = state["lam"]
+    extinctions = state["extinctions"]
+    n_sn_total = len(state["sn_names"])
 
-    # Done once for the whole extinction group: the shift is shared.
-    sn_at_z = redshift_bank(state["sn_bank"], z)[np.newaxis, :, :]
-    gal_at_z = redshift_bank(state["gal_bank"], z)[:, np.newaxis, :]
+    # Only this block is shifted. Shifting all 15561 templates in every task
+    # was the largest duplicated cost in a scan.
+    sn_at_z = state["sn_bank"].at_redshift(z, rows=rows) / (1.0 + z)
+    gal_at_z = redshift_bank(state["gal_bank"], z)
 
     # Extinction acts at the template's rest wavelength, which for observed
     # pixel lam is lam / (1 + z). Evaluating the law there directly is exact
     # and avoids interpolating the extinction curve. Rest frame means this
     # models host-galaxy dust; see redshifted_models.
     alam_rest = Alam(lam / (1.0 + z), R_v=state["R_v"])
+    reddening = 10.0 ** (-0.4 * np.asarray(extinctions)[:, np.newaxis] * alam_rest)
 
-    results = []
-    for extcon in extinctions:
-        reddening = 10 ** (-0.4 * extcon * alam_rest)
+    b, d, chi2, times = solve_extinction_batch(
+        sn_at_z,
+        gal_at_z,
+        state["int_obj"],
+        state["sigma"],
+        reddening,
+        weighted=state["weighted"],
+    )
 
-        result, _ = core(
-            state["int_obj"],
-            z,
-            extcon,
-            sn_at_z * reddening,
-            gal_at_z,
-            state["sn_names"],
-            state["gal_names"],
-            lam,
-            state["iterations"],
-            state["sigma"],
-            **state["kwargs"]
+    # Same scoring as core(): short overlaps are excluded, and a zero score
+    # is a degenerate fit rather than a perfect one.
+    overlap = times / len(lam) > state["minimum_overlap"]
+    chi2 = np.where(overlap, chi2, np.inf)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dof = times - 2
+        reduchi2 = chi2 / dof**2
+        reduchi2_once = chi2 / dof
+
+    reduchi2 = np.where(reduchi2 == 0, 1e10, reduchi2)
+    reduchi2_once = np.where(reduchi2_once == 0, 1e10, reduchi2_once)
+
+    ranked, values = _top_k_per_extinction(
+        reduchi2, state["iterations"], rows.start, n_sn_total
+    )
+
+    # Mean flux of each candidate's model, for the Frac(SN) split. Taken from
+    # the same reddened template the fitter scored, and computed as a
+    # contraction rather than a nanmean per candidate: the numerator is
+    # sum(reddening * flux) over the template's own coverage and the
+    # denominator its pixel count, which is one small matrix product for the
+    # whole block.
+    mS = np.isfinite(sn_at_z)
+    covered = mS.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sn_mean = (reddening @ np.where(mS, sn_at_z, 0.0).T) / covered
+    gal_mean = np.nanmean(gal_at_z, axis=1)
+
+    records = []
+    for a in range(len(extinctions)):
+        gal_index = ranked[a] // n_sn_total
+        sn_index = ranked[a] % n_sn_total
+        local = sn_index - rows.start
+        records.append(
+            {
+                "z": float(z),
+                "extcon": float(extinctions[a]),
+                "gal_index": gal_index,
+                "sn_index": sn_index,
+                "b": b[a][gal_index, local],
+                "d": d[a][gal_index, local],
+                "reduchi2": values[a],
+                "reduchi2_once": reduchi2_once[a][gal_index, local],
+                "sn_mean": sn_mean[a][local],
+                "gal_mean": gal_mean[gal_index],
+            }
         )
-        results.append(result)
 
-    return results
+    return records
 
 
 # Past this many processes the fork and queue overhead costs more than the
@@ -560,26 +774,32 @@ def _fit_one_grid_point(args):
 DEFAULT_MAX_WORKERS = 32
 
 
-def build_tasks(redshift, extconstant, n_workers):
-    """Split the (redshift, A_v) grid into units of work.
+def build_tasks(redshift, n_sn, n_workers, block=DEFAULT_SN_BLOCK):
+    """Split the work into units of (one redshift, one block of supernovae).
 
-    A unit is one redshift plus a group of extinction values, because the
-    redshift shift is shared across extinction and wants to be done once.
-    Grouping too coarsely would leave workers idle when there is only one
-    redshift, so the extinction axis is split into enough pieces to keep the
-    pool busy and no more.
+    Not by extinction. The whole A_v grid is evaluated together now -- that is
+    what makes the products large and lets the A_v-independent contractions be
+    computed once -- so splitting it would undo the saving and, at an exact
+    redshift, would also shift the same bank once per group.
+
+    The block is shrunk when there is not enough other work to keep the pool
+    busy: one redshift and one block would leave every worker but one idle.
     """
 
     redshift = np.atleast_1d(redshift)
-    extconstant = np.atleast_1d(extconstant)
+    n_z = len(redshift)
 
-    target_tasks = max(1, n_workers * 4)
-    groups_per_z = int(np.ceil(target_tasks / len(redshift)))
-    n_groups = max(1, min(len(extconstant), groups_per_z))
+    target_tasks = max(1, n_workers * 2)
+    blocks_wanted = int(np.ceil(target_tasks / n_z))
+    block = int(min(block, max(1, int(np.ceil(n_sn / max(1, blocks_wanted))))))
 
-    extinction_groups = np.array_split(extconstant, n_groups)
+    bounds = list(range(0, n_sn, block)) + [n_sn]
 
-    return [(float(z), group) for z in redshift for group in extinction_groups]
+    return [
+        (float(z), slice(lo, hi))
+        for z in redshift
+        for lo, hi in zip(bounds[:-1], bounds[1:])
+    ]
 
 
 def resolve_worker_count(requested, n_tasks):
@@ -812,9 +1032,18 @@ def all_parameter_space(
     # here rather than once per grid point inside core().
     sigma = error_obj(kwargs["kind"], lam, kwargs["original"])
 
+    # What goes in the SPECTRUM column. Falls back to the filename when the
+    # observation came from disk and no name was given.
+    spectrum_name = kwargs.get("spectrum_name")
+    if spectrum_name is None:
+        original = kwargs["original"]
+        spectrum_name = (
+            os.path.basename(original) if isinstance(original, str) else "spectrum"
+        )
+
     n_grid_points = len(redshift) * len(extconstant)
     n_workers = resolve_worker_count(kwargs.get("n_cores"), n_grid_points)
-    params = build_tasks(redshift, extconstant, n_workers)
+    params = build_tasks(redshift, len(sn_spec_files), n_workers)
 
     fit_start = time.time()
 
@@ -836,17 +1065,19 @@ def all_parameter_space(
             "lam": lam,
             "iterations": iterations,
             "sigma": sigma,
+            "extinctions": np.atleast_1d(extconstant).astype(float),
+            "weighted": bool(kwargs.get("weighted_solve", False)),
+            "minimum_overlap": kwargs["minimum_overlap"],
             "R_v": kwargs.get("R_v", 3.1),
-            "kwargs": kwargs,
         }
 
         try:
             if n_workers == 1:
-                # One grid point, or an explicit request for serial: skip the
-                # pool entirely rather than paying to fork for a single task.
-                results = [_fit_one_grid_point(p) for p in tqdm(params)]
+                # One block, or an explicit request for serial: skip the pool
+                # entirely rather than paying to fork for a single task.
+                results = [_fit_one_block(p) for p in tqdm(params)]
             else:
-                # Each worker's chi2 is a handful of small BLAS calls. Left to
+                # Each worker's chi2 is a handful of BLAS calls. Left to
                 # themselves they would each spin up a full thread pool, so N
                 # workers times N BLAS threads fight over the same cores.
                 # Forked children inherit this limit.
@@ -863,7 +1094,15 @@ def all_parameter_space(
         )
     )
 
-    result = table.vstack([t for group in results for t in group])
+    result = assemble_results(
+        merge_blocks(
+            [record for group in results for record in group], iterations
+        ),
+        sn_spec_files,
+        templates_gal_trunc,
+        spectrum_name,
+        iterations,
+    )
 
     result.sort("CHI2/dof2")
 
@@ -880,6 +1119,145 @@ def all_parameter_space(
     print("Runtime: {0: .2f}s ".format(end - start))
 
     return
+
+
+def merge_blocks(records, iterations):
+    """Reduce each grid point's per-block candidates to its overall best.
+
+    A worker sees one block of the bank, so its top ten are the best ten *in
+    that block*. The grid point's answer is the best ten across all of them,
+    which is this: group by (redshift, A_v), concatenate, and take the top ten
+    again. Without it a run reports ten candidates per block rather than per
+    grid point -- 394 rows where there should be 20, once duplicates are
+    dropped.
+
+    Ordering is by score and then by the position in the (galaxy, supernova)
+    grid, the same total order each block used, so the result does not depend
+    on how the bank was divided.
+    """
+
+    grouped = {}
+    for record in records:
+        grouped.setdefault((record["z"], record["extcon"]), []).append(record)
+
+    merged = []
+    for (z, extcon), group in grouped.items():
+        # No shortcut for a single block. Each block is already trimmed to
+        # `iterations`, so one block would come out right either way -- but a
+        # function whose guarantee holds only when the work happened to be
+        # split a particular way is a function whose guarantee does not hold.
+        joined = {
+            key: np.concatenate([np.atleast_1d(r[key]) for r in group])
+            for key in (
+                "gal_index", "sn_index", "b", "d",
+                "reduchi2", "reduchi2_once", "sn_mean", "gal_mean",
+            )
+        }
+
+        n_sn_total = int(joined["sn_index"].max()) + 1
+        position = joined["gal_index"] * n_sn_total + joined["sn_index"]
+        order = np.lexsort((position, joined["reduchi2"]))[:iterations]
+
+        record = {"z": z, "extcon": extcon}
+        record.update({key: value[order] for key, value in joined.items()})
+        merged.append(record)
+
+    return merged
+
+
+def assemble_results(records, sn_names, gal_names, spectrum_name, iterations):
+    """One results table, built once from every block's candidate records.
+
+    Workers hand back numeric indices and numbers. Names, phases and bands are
+    resolved here, and the table is constructed once for the whole run rather
+    than once per grid point: each construction validates and type-converts
+    thirteen columns, and at one per grid point that cost more than the chi2 it
+    was reporting.
+    """
+
+    if not records:
+        raise RuntimeError(
+            "The fit produced no candidates at all. Every template was either "
+            "rejected for too little overlap with the observation or had no "
+            "usable amplitude solution."
+        )
+
+    z = np.concatenate([np.full(len(r["gal_index"]), r["z"]) for r in records])
+    av = np.concatenate([np.full(len(r["gal_index"]), r["extcon"]) for r in records])
+    gal_index = np.concatenate([r["gal_index"] for r in records])
+    sn_index = np.concatenate([r["sn_index"] for r in records])
+    b = np.concatenate([r["b"] for r in records])
+    d = np.concatenate([r["d"] for r in records])
+    reduchi2 = np.concatenate([r["reduchi2"] for r in records])
+    reduchi2_once = np.concatenate([r["reduchi2_once"] for r in records])
+    sn_mean = np.concatenate([r["sn_mean"] for r in records])
+    gal_mean = np.concatenate([r["gal_mean"] for r in records])
+
+    # A candidate whose score is the degenerate sentinel never belonged in the
+    # table; a grid point with fewer than `iterations` real candidates used to
+    # pad the table out with them.
+    keep = np.isfinite(reduchi2) & (reduchi2 < 1e10)
+    if not keep.any():
+        keep = np.ones(len(reduchi2), dtype=bool)
+
+    z, av = z[keep], av[keep]
+    gal_index, sn_index = gal_index[keep], sn_index[keep]
+    b, d = b[keep], d[keep]
+    reduchi2, reduchi2_once = reduchi2[keep], reduchi2_once[keep]
+    sn_mean, gal_mean = sn_mean[keep], gal_mean[keep]
+
+    sn_lookup = np.asarray([str(x) for x in sn_names], dtype=object)
+    gal_lookup = np.asarray(
+        [os.path.basename(str(x)) for x in gal_names], dtype=object
+    )
+
+    supernovae = sn_lookup[sn_index]
+    galaxies = gal_lookup[gal_index]
+
+    # The shorthand carries "... phase-band : <phase><band>"; the phase is
+    # everything after the colon bar the final character, which is the band.
+    phases = [name[name.rfind(":") + 1 : -1] for name in supernovae]
+    bands = [name[-1] for name in supernovae]
+
+    sn_contribution = b * sn_mean
+    gal_contribution = d * gal_mean
+    with np.errstate(divide="ignore", invalid="ignore"):
+        total = sn_contribution + gal_contribution
+        frac_sn = sn_contribution / total
+        frac_gal = gal_contribution / total
+
+    return table.Table(
+        [
+            np.full(len(z), os.path.basename(str(spectrum_name)), dtype="S200"),
+            np.array(galaxies, dtype="S200"),
+            np.array(supernovae, dtype="S200"),
+            b.astype("f"),
+            d.astype("f"),
+            z.astype("f"),
+            av.astype("f"),
+            np.array(phases, dtype="S200"),
+            np.array(bands, dtype="S200"),
+            frac_sn.astype("f"),
+            frac_gal.astype("f"),
+            reduchi2_once.astype("f"),
+            reduchi2.astype("f"),
+        ],
+        names=(
+            "SPECTRUM",
+            "GALAXY",
+            "SN",
+            "CONST_SN",
+            "CONST_GAL",
+            "Z",
+            "A_v",
+            "Phase",
+            "Band",
+            "Frac(SN)",
+            "Frac(gal)",
+            "CHI2/dof",
+            "CHI2/dof2",
+        ),
+    )
 
 
 def grid_edge_warnings(result, redshift, extconstant, n_check=3):
@@ -942,7 +1320,7 @@ def _run_pool(params, n_workers):
     with ctx.Pool(processes=n_workers, **pool_kwargs) as pool:
         return list(
             tqdm(
-                pool.imap(_fit_one_grid_point, params, chunksize=chunksize),
+                pool.imap(_fit_one_block, params, chunksize=chunksize),
                 total=len(params),
             )
         )
