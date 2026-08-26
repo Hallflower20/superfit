@@ -121,6 +121,12 @@ DEFAULT_CONFIG = {
     # --- fitting ---------------------------------------------------------
     "iterations": 10,
     "n_cores": 0,
+    # Re-check the template bank against the filesystem at the start of this
+    # fit. On by default, and the right default for a single fit. A batch that
+    # wants the bank pinned for its whole run sets this off -- see
+    # superfit.Session, which manages it -- because the check is a directory
+    # listing and the largest bank is 15561 stats.
+    "revalidate_bank": True,
     "weighted_solve": False,
     # Which set of scientific defaults this run used; see PROFILES.
     "profile": "legacy",
@@ -143,6 +149,7 @@ DEFAULT_CONFIG = {
 BOOLEAN_KEYS = frozenset(
     [
         "use_exact_z",
+        "revalidate_bank",
         "mask_galaxy_lines",
         "mask_telluric",
         "weighted_solve",

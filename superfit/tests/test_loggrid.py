@@ -292,39 +292,66 @@ class TestRedshifting:
 
 
 class TestBuildTasks:
-    """Work is split so the redshift shift is done once per group."""
+    """Work is split by redshift and by block of supernovae, not by extinction.
+
+    The whole A_v grid is now evaluated in one pass -- that is what lets the
+    A_v-independent contractions be computed once and makes the products large
+    -- so splitting the extinction axis would undo the saving, and at an exact
+    redshift it would also shift the same bank once per group.
+    """
 
     @staticmethod
-    def _tasks(n_z, n_ext, n_workers):
+    def _tasks(n_z, n_sn, n_workers, block=2048):
         from superfit.SF_functions import build_tasks
 
         return build_tasks(
-            np.linspace(0.0, 0.2, n_z), np.linspace(-2.0, 2.0, n_ext), n_workers
+            np.linspace(0.0, 0.2, n_z), n_sn, n_workers, block=block
         )
 
-    def test_every_grid_point_appears_exactly_once(self):
-        tasks = self._tasks(5, 21, 8)
+    def test_every_template_is_covered_exactly_once_per_redshift(self):
+        tasks = self._tasks(5, 947, 8)
 
-        pairs = [(z, float(e)) for z, group in tasks for e in group]
-        assert len(pairs) == 5 * 21
-        assert len(set(pairs)) == 5 * 21
+        by_z = {}
+        for z, rows in tasks:
+            by_z.setdefault(z, []).extend(range(rows.start, rows.stop))
+
+        assert len(by_z) == 5
+        for covered in by_z.values():
+            assert sorted(covered) == list(range(947))
 
     def test_a_single_redshift_still_fills_the_pool(self):
         """One redshift must not collapse to one task and leave workers idle."""
 
-        tasks = self._tasks(1, 21, 8)
+        tasks = self._tasks(1, 947, 8)
         assert len(tasks) > 1
 
-    def test_many_redshifts_group_extinction_together(self):
-        """With plenty of redshifts, each task should carry several A_v values."""
+    def test_blocks_are_capped_so_a_worker_bounds_its_memory(self):
+        """The score arrays are (n_av, n_gal, block); the block bounds them."""
 
-        tasks = self._tasks(50, 21, 8)
-        assert max(len(group) for _, group in tasks) > 1
+        tasks = self._tasks(50, 40000, 8, block=2048)
 
-    def test_each_task_is_one_redshift(self):
-        for z, group in self._tasks(5, 21, 8):
-            assert np.isscalar(z) or np.ndim(z) == 0
-            assert len(group) >= 1
+        assert max(rows.stop - rows.start for _z, rows in tasks) <= 2048
+
+    def test_plenty_of_redshifts_need_not_be_split_further(self):
+        """With work to spare, one task per redshift is enough."""
+
+        tasks = self._tasks(50, 947, 8)
+
+        assert len(tasks) == 50
+        assert all(rows.start == 0 and rows.stop == 947 for _z, rows in tasks)
+
+    def test_each_task_is_one_redshift_and_one_block(self):
+        for z, rows in self._tasks(5, 947, 8):
+            assert np.ndim(z) == 0
+            assert isinstance(rows, slice)
+            assert 0 <= rows.start < rows.stop <= 947
+
+    def test_a_bank_smaller_than_one_block_is_not_split_into_empties(self):
+        tasks = self._tasks(1, 3, 8)
+
+        assert all(rows.stop > rows.start for _z, rows in tasks)
+        covered = sorted(i for _z, rows in tasks for i in range(rows.start, rows.stop))
+        assert covered == [0, 1, 2]
 
 
 class TestRedshiftCostIsFlat:

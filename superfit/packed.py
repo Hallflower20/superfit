@@ -861,17 +861,25 @@ def _pack_for(path, bank_dir=None):
     return None, None
 
 
-def begin_fit():
+def begin_fit(revalidate=True):
     """Mark every open pack for one revalidation against its source.
 
     Called at the start of a fit. The check itself is deferred to the next
     lookup and happens at most once per pack per fit, so a fit that reads
     15000 templates pays for one directory listing rather than 15000.
+
+    ``revalidate=False`` skips it, and is for a caller that has pinned the
+    bank deliberately. The check is a directory listing, which on the largest
+    bank is 15561 stats -- about 2 s warm and considerably worse on a busy
+    parallel filesystem. Paying that per spectrum through a batch of hundreds
+    is not obviously better than pinning the bank for the batch and saying so,
+    which is what :class:`superfit.Session` does.
     """
 
-    for pack in _open_packs.values():
-        if pack is not None:
-            pack._revalidate = True
+    if revalidate:
+        for pack in _open_packs.values():
+            if pack is not None:
+                pack._revalidate = True
 
     # A pack that was absent last time may have been built since, and the set
     # of packable directories can grow when a binning is added.
@@ -890,6 +898,61 @@ def forget_open_packs():
 
     _open_packs.clear()
     _packable.clear()
+
+
+def load_templates(paths, reader="loadtxt", bank_dir=None):
+    """Read many bank templates, resolving the pack once for the batch.
+
+    Yields ``(path, array, error)``: ``error`` is None when the template was
+    read, and otherwise the exception, so a caller can report the ones a bank
+    lists but cannot supply without a try/except around every one.
+
+    :func:`load_template` resolves which pack covers a path on every call --
+    an abspath, a relpath, and a dictionary lookup each time. That is 29 us a
+    template against 6 us to slice one straight out of an open pack, so on the
+    largest bank the difference is about a third of a second. Small next to the
+    directory listing that validates the pack, and worth having anyway: this is
+    also the interface a long-lived session wants, where the listing is paid
+    once and the slicing is all that repeats.
+    """
+
+    paths = list(paths)
+    if not paths:
+        return
+
+    # Every template in one call comes from one directory in practice, so the
+    # pack is resolved from the first and reused. A path the first pack does
+    # not cover falls back to the per-path lookup rather than being missed.
+    first_pack, _ = _pack_for(paths[0], bank_dir) if paths else (None, None)
+
+    for path in paths:
+        array = None
+
+        if first_pack is not None and first_pack.reader == reader:
+            relative = _relative_within(path, first_pack)
+            if relative is not None:
+                try:
+                    array = first_pack.get(relative)
+                except PackUnusable:
+                    first_pack = None
+
+        if array is None:
+            try:
+                array = load_template(path, reader, bank_dir=bank_dir)
+            except Exception as exc:  # noqa: BLE001 -- reported, not raised
+                yield path, None, exc
+                continue
+
+        yield path, array, None
+
+
+def _relative_within(path, pack):
+    """``path`` relative to a pack's source directory, or None if outside it."""
+
+    relative = os.path.relpath(os.path.abspath(path), pack.source_directory)
+    if relative.startswith(os.pardir):
+        return None
+    return relative.replace(os.sep, "/")
 
 
 def load_template(path, reader="loadtxt", bank_dir=None):

@@ -131,3 +131,43 @@ print(bank.sha256_of(p))
 Note that the server hosting the archive answers 403 to urllib's default
 User-Agent, which is why `bank.download` sets one. A plain
 `urllib.request.urlopen(url)` will appear to be a network failure.
+
+## Fitting many spectra in one process
+
+Preparing the bank -- validating the pack, reading every template, masking,
+resampling onto the log grid -- is the expensive half of a fit and has nothing
+to do with the spectrum. On the largest bank it is about 2.6 s warm against
+2.0 s of actual fitting, so a hundred spectra run as a hundred fits pay it a
+hundred times.
+
+`superfit.Session` pays it once:
+
+```python
+from superfit import Session
+
+with Session(bank="modern-curated", z=0.1, lower_lam=3500, upper_lam=9000) as s:
+    for path in spectra:
+        print(s.fit(path).results.iloc[0]["SN"])
+```
+
+Two things are worth knowing.
+
+**The grid has to match.** The prepared bank is reused only when the observed
+grid does, because a redshift is a shift along that grid and templates
+resampled onto one grid mean nothing on another. The grid comes from each
+observation's own wavelength range unless `lower_lam` and `upper_lam` are set,
+so a batch of spectra with different ranges reuses nothing. Setting an explicit
+range is what makes a batch share the preparation, and it is also the honest
+thing to do when comparing classifications across spectra -- otherwise each was
+fitted over a different span.
+
+**The bank is pinned.** A session validates the bank at its first fit and does
+not re-list it for each one after. Re-listing the largest bank is 15561 stats,
+and a batch is a thing you want fitted against *one* bank anyway: a bank
+changing halfway through is a problem to notice rather than a change to follow
+silently. `session.revalidate()` checks again, and a standalone
+`Superfit(...).run()` still checks on every fit.
+
+The cache behind this is process-wide, so repeated `Superfit(...).run()` calls
+in one process get the same reuse; `Session` is the sanctioned way to ask for
+it, and the only way to pin the bank.
