@@ -305,7 +305,11 @@ class Spectrum:
         """Raise if binning would leave too few points to fit meaningfully."""
 
         span = self.wavelength[-1] - self.wavelength[0]
-        bin_width = 30 if self.median_spacing > 10 else 10
+        # What the fit will actually sample at: data already coarser than the
+        # requested resolution is passed through unbinned. This used to guess
+        # 10 or 30 A from the spacing and ignore `resolution` entirely, so a
+        # coarse-resolution fit of a short spectrum sailed past the guard.
+        bin_width = max(float(resolution), self.median_spacing)
         n_bins = span / bin_width
 
         if n_bins < minimum_bins:

@@ -8,6 +8,7 @@ z=0.2); a.run()`` fitted s1 at z=0.2. Two fits in one process, and any kind
 of concurrency, were quietly wrong. Nothing here is global any more.
 """
 
+import functools
 import glob
 import numpy as np
 import os
@@ -198,6 +199,7 @@ class Parameters:
 
         # Globbed out of self.bank_dir, never out of the process-wide bank.
         binned = self.resolution if self.resolution in (10, 30) else None
+        self._binned_resolution = binned
 
         templates_gal = glob.glob(
             os.path.join(gal_dir(binned, self.bank_dir), "*")
@@ -207,8 +209,25 @@ class Parameters:
         ]
         templates_gal = np.array(templates_gal)
 
+        self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
+
+        self._frozen = True
+
+    @functools.cached_property
+    def templates_sn_trunc(self):
+        """Supernova template paths matching the selected types.
+
+        The fit itself does not read this -- it resolves its supernova list
+        from the bank metadata, which matches types exactly -- so the glob of
+        the whole supernova tree it takes to build (a thousand-odd directory
+        entries, several seconds on a cold parallel filesystem) is deferred
+        until something actually asks.
+        """
+
         templates_sn = glob.glob(
-            os.path.join(sne_dir(binned, self.bank_dir), "**", "**", "*")
+            os.path.join(
+                sne_dir(self._binned_resolution, self.bank_dir), "**", "**", "*"
+            )
         )
         templates_sn = [
             x
@@ -218,12 +237,8 @@ class Parameters:
             and "photometry" not in x
             and "photometry.pdf" not in x
         ]
-        templates_sn = np.array(templates_sn)
 
-        self.templates_sn_trunc = select_templates(templates_sn, self.temp_sn_tr)
-        self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
-
-        self._frozen = True
+        return select_templates(np.array(templates_sn), self.temp_sn_tr)
 
     def __setattr__(self, name, value):
         if self._frozen:
@@ -234,9 +249,11 @@ class Parameters:
         object.__setattr__(self, name, value)
 
     def __repr__(self):
-        return "<Parameters for {!r}: {} SN and {} galaxy templates>".format(
+        # Deliberately does not touch templates_sn_trunc: a repr should not
+        # cost a walk of the template bank.
+        return "<Parameters for {!r}: {} SN types and {} galaxy templates>".format(
             self.object_to_fit,
-            len(self.templates_sn_trunc),
+            len(self.temp_sn_tr),
             len(self.templates_gal_trunc),
         )
 

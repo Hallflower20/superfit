@@ -7,9 +7,13 @@ quoting a result.
 
 `Superfit.run()` prepares the observation and then hands it to
 `all_parameter_space`, which evaluates every (redshift, A_v) grid point
-across a process pool. Within a grid point, `solve_grid` fits every
+across a process pool. Within a grid point, the fit solves every
 (galaxy, supernova) pair at once as a set of matrix products and scores each
-with chi2 — that is where nearly all the time goes.
+with chi2 — that is where nearly all the time goes. A `GridSolver` is built
+once per redshift and computes everything A_v cannot change (the validity
+masks, the weights, every galaxy-side contraction); each A_v then only pays
+for the supernova-side terms, which is bit-identical to solving the reddened
+bank from scratch and roughly three times faster over the default A_v grid.
 
 ```
 Spectrum  ──▶  mask host lines / telluric  ──▶  normalise  ──▶  int_obj
@@ -18,8 +22,8 @@ Spectrum  ──▶  mask host lines / telluric  ──▶  normalise  ──▶
                                                         │         │
                           all_parameter_space  ◀────────┴─────────┘
                                     │
-                    for each (z, A_v):  solve_grid  ──▶  top `iterations`
-                                    │
+              for each z:  GridSolver  ──▶  for each A_v:  solve
+                                    │             ──▶  top `iterations`
                           rank, dedupe by SN, write results.csv
 ```
 

@@ -4,7 +4,7 @@ import os
 import pandas as pd
 import csv
 import threading
-from superfit.paths import MJD_MAX_BRIGHTNESS_CSV, mjd_max_brightness_csv, sne_dir
+from superfit.paths import mjd_max_brightness_csv, sne_dir
 
 
 def JD(mjd):

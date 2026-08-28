@@ -2,12 +2,9 @@ import numpy as np
 from scipy import interpolate
 import extinction
 from astropy import table
-from astropy.table import Table
 from astropy.io import ascii
 import contextlib
-import itertools
 import os
-from PyAstronomy import pyasl
 import multiprocessing as mp
 import threading
 from tqdm import tqdm
@@ -18,7 +15,6 @@ from superfit.Header_Binnings import (
     bin_spectrum_bank,
     mask_host_lines,
     mask_lines_bank,
-    normalise_flux,
 )
 from superfit.loggrid import RedshiftableTemplates
 from superfit import packed as packed_module
@@ -209,93 +205,150 @@ def solve_grid(sn, gal, int_obj, sigma, weighted=False):
         each chi2 was accumulated over.
     """
 
-    S = np.ascontiguousarray(sn[0], dtype=np.float64)  # (n_sn, n_lam)
-    G = np.ascontiguousarray(gal[:, 0], dtype=np.float64)  # (n_gal, n_lam)
-    obj = np.asarray(int_obj, dtype=np.float64)
-    sig = np.asarray(sigma, dtype=np.float64)
+    return GridSolver(sn, gal, int_obj, sigma, weighted=weighted).solve()
 
-    n_lam = S.shape[1]
 
-    # Where each array actually carries a value.
-    mS = np.isfinite(S)
-    mG = np.isfinite(G)
-    m_obj = np.isfinite(obj)
+class GridSolver:
+    """The chi2 grid at one redshift, solvable for many extinction values.
 
-    S0 = np.where(mS, S, 0.0)
-    G0 = np.where(mG, G, 0.0)
-    obj0 = np.where(m_obj, obj, 0.0)
+    :func:`solve_grid` on a reddened bank recomputes, at every A_v, work that
+    A_v cannot change: reddening is a positive finite per-pixel multiplier, so
+    it moves no validity mask, and half the contractions -- everything on the
+    galaxy and observation side -- do not involve the supernova at all. This
+    class computes those once, from the *unreddened* bank at one redshift, and
+    :meth:`solve` folds a reddening vector into just the supernova-side terms.
 
-    # --- weighted contractions over wavelength ----------------------------
-    # A pixel contributes only if the observation, the error and both
-    # templates are defined there.
-    valid_obs = m_obj & np.isfinite(sig)
+    The per-A_v terms are evaluated by the same operations in the same order
+    as :func:`solve_grid` always used, so the results are bit-identical to
+    reddening the bank first; the regression suite holds either way. On the
+    default 21-point A_v grid this removes roughly half the arithmetic from
+    the hot loop.
+    """
 
-    A = (mS & valid_obs).astype(np.float64)  # (n_sn, n_lam)
-    B = (mG & valid_obs).astype(np.float64)  # (n_gal, n_lam)
+    def __init__(self, sn, gal, int_obj, sigma, weighted=False):
+        S = np.ascontiguousarray(sn[0], dtype=np.float64)  # (n_sn, n_lam)
+        G = np.ascontiguousarray(gal[:, 0], dtype=np.float64)  # (n_gal, n_lam)
+        obj = np.asarray(int_obj, dtype=np.float64)
+        sig = np.asarray(sigma, dtype=np.float64)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        w = np.where(valid_obs, 1.0 / sig**2, 0.0)
+        self.weighted = bool(weighted)
 
-    times = B @ A.T
+        # Where each array actually carries a value. Reddening is finite and
+        # positive, so these masks hold for every A_v that will be asked for.
+        mS = np.isfinite(S)
+        mG = np.isfinite(G)
+        m_obj = np.isfinite(obj)
 
-    SA = S0 * A
-    GB = G0 * B
+        self._S0 = np.where(mS, S, 0.0)
+        G0 = np.where(mG, G, 0.0)
+        obj0 = np.where(m_obj, obj, 0.0)
 
-    t_oo = (B * (w * obj0 * obj0)) @ A.T
-    t_os = B @ (SA * (w * obj0)).T
-    t_og = (GB * (w * obj0)) @ A.T
-    t_ss = B @ (SA * SA * w).T
-    t_sg = (GB * w) @ SA.T
-    t_gg = (GB * GB * w) @ A.T
+        # --- weighted contractions over wavelength ------------------------
+        # A pixel contributes only if the observation, the error and both
+        # templates are defined there.
+        valid_obs = m_obj & np.isfinite(sig)
 
-    # --- amplitudes -------------------------------------------------------
-    if weighted:
-        # The normal equations for the chi2 that is actually reported: every
-        # sum carries 1/sigma**2 and runs over the pair's own overlap. These
-        # are the same six contractions the chi2 is built from.
-        n_ss, n_gg, n_gs, n_so, n_go = t_ss, t_gg, t_sg, t_os, t_og
-    else:
-        # Historical behaviour: the amplitudes minimise the UNWEIGHTED
-        # residual even though the chi2 they are scored by is weighted, so the
-        # reported chi2 is not the minimum of the reported model. Kept as the
-        # default so existing results reproduce; see the "weighted_solve"
-        # option. Note sum(sn^2) runs over the supernova's own coverage rather
-        # than its overlap with the galaxy, which is also preserved here.
-        n_ss = (S0 * S0).sum(axis=1)[np.newaxis, :]          # (1, n_sn)
-        n_gg = (G0 * G0).sum(axis=1)[:, np.newaxis]          # (n_gal, 1)
-        n_gs = G0 @ S0.T                                      # (n_gal, n_sn)
-        n_so = (S0 @ obj0)[np.newaxis, :]                     # (1, n_sn)
-        n_go = (G0 @ obj0)[:, np.newaxis]                     # (n_gal, 1)
+        A = (mS & valid_obs).astype(np.float64)  # (n_sn, n_lam)
+        B = (mG & valid_obs).astype(np.float64)  # (n_gal, n_lam)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        c = 1.0 / (n_ss * n_gg - n_gs**2)
-        b = c * (n_gg * n_so - n_gs * n_go)
-        d = c * (n_ss * n_go - n_gs * n_so)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = np.where(valid_obs, 1.0 / sig**2, 0.0)
 
-    b = np.where(b < 0, np.nan, b)
-    d = np.where(d < 0, np.nan, d)
+        self._times = B @ A.T
 
-    # --- chi2 -------------------------------------------------------------
-    with np.errstate(invalid="ignore"):
-        chi2 = (
-            t_oo
-            - 2.0 * b * t_os
-            - 2.0 * d * t_og
-            + b**2 * t_ss
-            + 2.0 * b * d * t_sg
-            + d**2 * t_gg
-        )
+        self._SA0 = self._S0 * A  # supernova masked to the valid pixels
+        GB = G0 * B
 
-    # Rounding can push an essentially perfect fit a hair below zero.
-    chi2 = np.where(chi2 < 0, 0.0, chi2)
+        # Everything the supernova does not appear in.
+        self._t_oo = (B * (w * obj0 * obj0)) @ A.T
+        self._t_og = (GB * (w * obj0)) @ A.T
+        self._t_gg = (GB * GB * w) @ A.T
 
-    # A rejected amplitude means the whole residual row was NaN, which the
-    # direct form scored as zero valid pixels; the overlap cut then rejects it.
-    rejected = ~np.isfinite(b) | ~np.isfinite(d)
-    times = np.where(rejected, 0.0, times)
-    chi2 = np.where(rejected, 0.0, chi2)
+        # Operands for the supernova-side terms solve() rebuilds per A_v.
+        self._B = B
+        self._GBw = GB * w
+        self._w = w
+        self._wobj = w * obj0
 
-    return b, d, chi2, times
+        if not self.weighted:
+            # Historical behaviour: the amplitudes minimise the UNWEIGHTED
+            # residual even though the chi2 they are scored by is weighted, so
+            # the reported chi2 is not the minimum of the reported model. Kept
+            # as the default so existing results reproduce; see the
+            # "weighted_solve" option. Note sum(sn^2) runs over the
+            # supernova's own coverage rather than its overlap with the
+            # galaxy, which is also preserved here.
+            self._G0 = G0
+            self._obj0 = obj0
+            self._n_gg = (G0 * G0).sum(axis=1)[:, np.newaxis]  # (n_gal, 1)
+            self._n_go = (G0 @ obj0)[:, np.newaxis]            # (n_gal, 1)
+
+    def solve(self, reddening=None):
+        """Amplitudes and chi2 with the supernovae dimmed by ``reddening``.
+
+        ``reddening`` is a positive, finite transmission per observed pixel,
+        or None for the bank exactly as it was given.
+
+        Returns ``(b, d, chi2, times)`` as :func:`solve_grid` does.
+        """
+
+        if reddening is None:
+            S0, SA = self._S0, self._SA0
+        else:
+            # Multiplying after the mask is exact: a masked entry is 0.0, and
+            # 0.0 times a finite reddening is 0.0.
+            S0 = self._S0 * reddening
+            SA = self._SA0 * reddening
+
+        t_os = self._B @ (SA * self._wobj).T
+        t_ss = self._B @ (SA * SA * self._w).T
+        t_sg = self._GBw @ SA.T
+
+        # --- amplitudes ---------------------------------------------------
+        if self.weighted:
+            # The normal equations for the chi2 that is actually reported:
+            # every sum carries 1/sigma**2 and runs over the pair's own
+            # overlap. These are the same contractions the chi2 is built from.
+            n_ss, n_gg, n_gs, n_so, n_go = (
+                t_ss, self._t_gg, t_sg, t_os, self._t_og,
+            )
+        else:
+            n_ss = (S0 * S0).sum(axis=1)[np.newaxis, :]  # (1, n_sn)
+            n_gs = self._G0 @ S0.T                        # (n_gal, n_sn)
+            n_so = (S0 @ self._obj0)[np.newaxis, :]       # (1, n_sn)
+            n_gg = self._n_gg
+            n_go = self._n_go
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            c = 1.0 / (n_ss * n_gg - n_gs**2)
+            b = c * (n_gg * n_so - n_gs * n_go)
+            d = c * (n_ss * n_go - n_gs * n_so)
+
+        b = np.where(b < 0, np.nan, b)
+        d = np.where(d < 0, np.nan, d)
+
+        # --- chi2 ---------------------------------------------------------
+        with np.errstate(invalid="ignore"):
+            chi2 = (
+                self._t_oo
+                - 2.0 * b * t_os
+                - 2.0 * d * self._t_og
+                + b**2 * t_ss
+                + 2.0 * b * d * t_sg
+                + d**2 * self._t_gg
+            )
+
+        # Rounding can push an essentially perfect fit a hair below zero.
+        chi2 = np.where(chi2 < 0, 0.0, chi2)
+
+        # A rejected amplitude means the whole residual row was NaN, which the
+        # direct form scored as zero valid pixels; the overlap cut then
+        # rejects it.
+        rejected = ~np.isfinite(b) | ~np.isfinite(d)
+        times = np.where(rejected, 0.0, self._times)
+        chi2 = np.where(rejected, 0.0, chi2)
+
+        return b, d, chi2, times
 
 
 def core(
@@ -339,6 +392,7 @@ def core(
     kind = kwargs["kind"]
     original = kwargs["original"]
     minimum_overlap = kwargs["minimum_overlap"]
+    reddening = kwargs.get("reddening")
 
     # What goes in the SPECTRUM column. Falls back to the filename when the
     # observation came from disk and no name was given.
@@ -349,10 +403,16 @@ def core(
     # sn and gal arrive already redshifted, extincted and resampled onto the
     # observed grid: on a log grid that is a shift shared by the whole bank,
     # so the caller does it once per redshift rather than once per grid point.
-
-    b, d, chi2, times = solve_grid(
-        sn, gal, int_obj, sigma, weighted=bool(kwargs.get("weighted_solve", False))
-    )
+    #
+    # A caller sweeping A_v at one redshift passes solved= from a GridSolver,
+    # which has already hoisted the extinction-independent half of the solve.
+    solved = kwargs.get("solved")
+    if solved is None:
+        solved = solve_grid(
+            sn, gal, int_obj, sigma,
+            weighted=bool(kwargs.get("weighted_solve", False)),
+        )
+    b, d, chi2, times = solved
 
     overlap = times / len(lam) > minimum_overlap
 
@@ -403,25 +463,29 @@ def core(
         bb = b[idx[0]][idx[1]]
         dd = d[idx[0]][idx[1]]
 
-        # `sn` arrives already reddened -- it is the model the fitter scored.
-        # This used to multiply by the extinction a second time, and at the
+        # The model the fitter scored: either `sn` arrives already reddened,
+        # or it arrives unreddened with the reddening alongside and only the
+        # reported rows pay for the multiply. (This used to multiply an
+        # already-reddened bank by the extinction a second time, and at the
         # observed rather than the rest wavelength the model was reddened at,
-        # so the reported flux split described a model nobody had fitted.
+        # so the reported flux split described a model nobody had fitted.)
         sn_flux = sn[0, idx[1], :]
+        if reddening is not None:
+            sn_flux = sn_flux * reddening
         gal_flux = gal[idx[0], 0, :]
         sn_contribution = bb * np.nanmean(sn_flux)
         gal_contribution = dd * np.nanmean(gal_flux)
         total = sn_contribution + gal_contribution
 
-        ii = supernova_file.rfind(":")
+        phase, band = split_phase_band(supernova_file)
 
         spectra.append(os.path.basename(name))
         galaxies.append(host_galaxy_file)
         supernovae.append(supernova_file)
         const_sn.append(bb)
         const_gal.append(dd)
-        phases.append(supernova_file[ii + 1 : -1])
-        bands.append(supernova_file[-1])
+        phases.append(phase)
+        bands.append(band)
         frac_sn.append(sn_contribution / total)
         frac_gal.append(gal_contribution / total)
         chi2_dof.append(reduchi2_once[idx])
@@ -461,6 +525,22 @@ def core(
     )
 
     return outputs, redchi2
+
+
+def split_phase_band(shorthand):
+    """The (phase, band) a template's shorthand name ends with.
+
+    The shorthand get_metadata builds ends ``": {phase}{band}"``, where phase
+    is a number or ``"u"`` for unknown and band is a filter letter that can
+    be absent. Splitting blindly at the last character used to hand the last
+    digit of the phase to the Band column whenever the band was empty --
+    every object the bank's phase table does not list.
+    """
+
+    tail = str(shorthand)[str(shorthand).rfind(":") + 1 :].strip()
+    if tail and tail != "u" and not tail[-1].isdigit():
+        return tail[:-1], tail[-1]
+    return tail, ""
 
 
 def mask_gal_lines(Data, z_obj):
@@ -531,6 +611,16 @@ def _fit_one_grid_point(args):
     # models host-galaxy dust; see redshifted_models.
     alam_rest = Alam(lam / (1.0 + z), R_v=state["R_v"])
 
+    # Everything A_v cannot change -- masks, weights, the galaxy-side
+    # contractions -- is computed once here and shared across the group.
+    solver = GridSolver(
+        sn_at_z,
+        gal_at_z,
+        state["int_obj"],
+        state["sigma"],
+        weighted=bool(state["kwargs"].get("weighted_solve", False)),
+    )
+
     results = []
     for extcon in extinctions:
         reddening = 10 ** (-0.4 * extcon * alam_rest)
@@ -539,13 +629,15 @@ def _fit_one_grid_point(args):
             state["int_obj"],
             z,
             extcon,
-            sn_at_z * reddening,
+            sn_at_z,
             gal_at_z,
             state["sn_names"],
             state["gal_names"],
             lam,
             state["iterations"],
             state["sigma"],
+            solved=solver.solve(reddening),
+            reddening=reddening,
             **state["kwargs"]
         )
         results.append(result)
@@ -564,17 +656,23 @@ def build_tasks(redshift, extconstant, n_workers):
     """Split the (redshift, A_v) grid into units of work.
 
     A unit is one redshift plus a group of extinction values, because the
-    redshift shift is shared across extinction and wants to be done once.
-    Grouping too coarsely would leave workers idle when there is only one
-    redshift, so the extinction axis is split into enough pieces to keep the
-    pool busy and no more.
+    redshift shift -- and now the whole extinction-independent half of the
+    solve, see GridSolver -- is shared across extinction and wants to be done
+    once. Grouping too coarsely would leave workers idle when there is only
+    one redshift, so the extinction axis is split into enough pieces to keep
+    the pool busy and no more; splitting beyond that repeats the shared work,
+    which is why a single worker never splits at all.
     """
 
     redshift = np.atleast_1d(redshift)
     extconstant = np.atleast_1d(extconstant)
 
-    target_tasks = max(1, n_workers * 4)
-    groups_per_z = int(np.ceil(target_tasks / len(redshift)))
+    if n_workers <= 1:
+        # Serial: any split of the extinction axis is pure repetition.
+        groups_per_z = 1
+    else:
+        target_tasks = max(1, n_workers * 4)
+        groups_per_z = int(np.ceil(target_tasks / len(redshift)))
     n_groups = max(1, min(len(extconstant), groups_per_z))
 
     extinction_groups = np.array_split(extconstant, n_groups)
