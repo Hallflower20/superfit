@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "superfit"
 description = "Spectral classification of supernovae against a template bank"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dynamic = ["version"]
 
@@ -30,7 +31,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -38,6 +38,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 
@@ -69,7 +70,9 @@ superfit = "superfit.cli:main"
 
 [tool.setuptools]
 # Explicit, so the template bank and the test outputs can never be swept in.
-packages = ["superfit", "superfit.tests"]
+# NGSF is the deprecated alias package the README promises: `import NGSF`
+# keeps working (and warns) after a plain `pip install superfit`.
+packages = ["superfit", "superfit.tests", "NGSF"]
 
 [tool.setuptools.dynamic]
 version = { attr = "superfit.__version__" }

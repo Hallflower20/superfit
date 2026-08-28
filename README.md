@@ -22,7 +22,7 @@ subsequent fit. Nothing else needs setting up.
 
 If you already have a bank — unzipped by hand, or shared on a cluster — pack
 it once with `superfit bank pack`. See
-[docs/cli.md](docs/cli.md#superfit-bank-pack).
+[docs/cli.md](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/cli.md#superfit-bank-pack).
 
 ### Choosing a bank
 
@@ -44,7 +44,7 @@ superfit fit spectrum.flm --z 0.127 --bank modern-curated
 
 The bank name is recorded in each run's `config.json`, because which
 templates produced a classification is part of the classification. See
-[docs/cli.md](docs/cli.md#superfit-bank-list).
+[docs/cli.md](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/cli.md#superfit-bank-list).
 
 Check it worked:
 
@@ -131,7 +131,7 @@ Each fit writes a directory named after the spectrum:
 A directory that already holds a result is not overwritten unless you pass
 `--overwrite`.
 
-![Output](ZTF18abokyfk_20180925_P60_v1_10_0.png)
+![Output](https://raw.githubusercontent.com/Hallflower20/superfit/sam-dev/ZTF18abokyfk_20180925_P60_v1_10_0.png)
 
 The plot shows the input object in red and the combined SN + host galaxy
 template in green. The legend gives the SN type, the host type, and the
@@ -140,13 +140,13 @@ the plot.
 
 ## Documentation
 
-- **[Command line](docs/cli.md)** — every command and flag, with examples.
-- **[Configuration](docs/configuration.md)** — every setting, what it means,
+- **[Command line](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/cli.md)** — every command and flag, with examples.
+- **[Configuration](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/configuration.md)** — every setting, what it means,
   and the Python API for passing them.
-- **[Methods](docs/methods.md)** — what the fit actually does: the log
+- **[Methods](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/methods.md)** — what the fit actually does: the log
   wavelength grid, the extinction model, the weighting, the template bank,
   and the warnings you should not ignore.
-- **[Development](docs/development.md)** — building an environment, running
+- **[Development](https://github.com/Hallflower20/superfit/blob/sam-dev/docs/development.md)** — building an environment, running
   the tests, cutting a release.
 
 ## Requirements
@@ -167,3 +167,7 @@ producing byte-identical results on either.
 superfit is only as good as the template bank it uses. If you publish a
 classification, say which bank version you used — `superfit bank status`
 prints its checksum.
+
+## License
+
+MIT — see [LICENSE](https://github.com/Hallflower20/superfit/blob/sam-dev/LICENSE).
