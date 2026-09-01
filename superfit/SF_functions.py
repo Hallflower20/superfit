@@ -351,6 +351,209 @@ class GridSolver:
         return b, d, chi2, times
 
 
+class SingleTemplateSolver:
+    """chi2 for ``observed ~= b * template``, every template at once.
+
+    The stars and QSOs of the modern banks are fit ALONE -- no host galaxy
+    underneath, and a QSO never offered as a host for a transient -- so their
+    solve has one amplitude, not two. The conventions mirror
+    :class:`GridSolver` exactly: the chi2 is weighted by 1/sigma**2 over the
+    pixels where the observation, the error and the template are all defined;
+    a negative amplitude is rejected; and under the legacy profile the
+    amplitude minimises the *unweighted* residual (over the template's own
+    coverage) while the reported chi2 is weighted, so category rows rank
+    against supernova rows on the same footing.
+    """
+
+    def __init__(self, templates, int_obj, sigma, weighted=False):
+        T = np.ascontiguousarray(templates, dtype=np.float64)  # (n_t, n_lam)
+        obj = np.asarray(int_obj, dtype=np.float64)
+        sig = np.asarray(sigma, dtype=np.float64)
+
+        self.weighted = bool(weighted)
+
+        mT = np.isfinite(T)
+        m_obj = np.isfinite(obj)
+
+        self._T0 = np.where(mT, T, 0.0)
+        obj0 = np.where(m_obj, obj, 0.0)
+
+        valid_obs = m_obj & np.isfinite(sig)
+        A = (mT & valid_obs).astype(np.float64)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = np.where(valid_obs, 1.0 / sig**2, 0.0)
+
+        self._times = A.sum(axis=1)
+        self._TA = self._T0 * A
+        self._t_oo = A @ (w * obj0 * obj0)
+        self._w = w
+        self._wobj = w * obj0
+        self._obj0 = obj0
+
+    def solve(self, reddening=None):
+        """Amplitude and chi2 with the templates dimmed by ``reddening``.
+
+        Returns ``(b, chi2, times)``, each (n_templates,).
+        """
+
+        if reddening is None:
+            T0, TA = self._T0, self._TA
+        else:
+            T0 = self._T0 * reddening
+            TA = self._TA * reddening
+
+        t_os = TA @ self._wobj
+        t_ss = (TA * TA) @ self._w
+
+        if self.weighted:
+            n_ss, n_so = t_ss, t_os
+        else:
+            n_ss = (T0 * T0).sum(axis=1)
+            n_so = T0 @ self._obj0
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            b = n_so / n_ss
+
+        b = np.where(b < 0, np.nan, b)
+
+        with np.errstate(invalid="ignore"):
+            chi2 = self._t_oo - 2.0 * b * t_os + b**2 * t_ss
+
+        chi2 = np.where(chi2 < 0, 0.0, chi2)
+
+        rejected = ~np.isfinite(b)
+        times = np.where(rejected, 0.0, self._times)
+        chi2 = np.where(rejected, 0.0, chi2)
+
+        return b, chi2, times
+
+
+def fit_standalone(
+    names,
+    arrays,
+    int_obj,
+    sigma,
+    lam,
+    observed_grid,
+    redshifts,
+    extinctions,
+    R_v=3.1,
+    weighted=False,
+    minimum_overlap=0.7,
+    spectrum_name="spectrum",
+):
+    """Fit a bank of host-less templates over a (z, A_v) grid.
+
+    This is the fit behind the star and QSO categories: each template is
+    matched to the observation on its own, over every redshift in
+    ``redshifts`` (the caller passes ``[0.0]`` for stars, which are
+    foreground) and every A_v in ``extinctions``, with the extinction law
+    evaluated at the rest wavelength exactly as the supernova fit does.
+
+    Returns an astropy Table with the same columns as :func:`core` -- one row
+    per template at its best grid point, ``GALAXY`` fixed to ``"none"`` and
+    the whole model flux attributed to the template -- or None when nothing
+    survives the overlap cut. Rows are comparable with the supernova rows
+    they will be ranked against: same chi2 conventions, same reduced-chi2
+    denominators.
+    """
+
+    if not names:
+        return None
+
+    bank = RedshiftableTemplates.from_templates(
+        [arrays[name][:, 0] for name in names],
+        [arrays[name][:, 1] for name in names],
+        observed_grid,
+        float(np.max(redshifts)),
+    )
+
+    n = len(names)
+    best_red2 = np.full(n, np.inf)
+    best_red1 = np.full(n, np.inf)
+    best_b = np.zeros(n)
+    best_z = np.zeros(n)
+    best_av = np.zeros(n)
+
+    n_lam = len(lam)
+
+    for z in np.atleast_1d(redshifts):
+        z = float(z)
+        solver = SingleTemplateSolver(
+            redshift_bank(bank, z), int_obj, sigma, weighted=weighted
+        )
+        alam_rest = Alam(lam / (1.0 + z), R_v=R_v)
+
+        for extcon in np.atleast_1d(extinctions):
+            reddening = 10 ** (-0.4 * float(extcon) * alam_rest)
+            b, chi2, times = solver.solve(reddening)
+
+            overlap = times / n_lam > minimum_overlap
+            chi2 = np.where(overlap, chi2, np.inf)
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                red2 = chi2 / (times - 2.0) ** 2
+                red1 = chi2 / (times - 2.0)
+            red2 = np.where(red2 == 0, 1e10, red2)
+            red1 = np.where(red1 == 0, 1e10, red1)
+
+            better = red2 < best_red2
+            best_red2 = np.where(better, red2, best_red2)
+            best_red1 = np.where(better, red1, best_red1)
+            best_b = np.where(better, b, best_b)
+            best_z = np.where(better, z, best_z)
+            best_av = np.where(better, float(extcon), best_av)
+
+    keep = np.isfinite(best_red2)
+    if not keep.any():
+        return None
+
+    kept = [(i, names[i]) for i in np.flatnonzero(keep)]
+
+    # Star names are metadata shorthands and carry a ": {phase}{band}" tail;
+    # QSO names are plain and have neither.
+    phases, bands = [], []
+    for _i, name in kept:
+        phase, band = split_phase_band(name) if ":" in name else ("u", "")
+        phases.append(phase)
+        bands.append(band)
+
+    k = len(kept)
+    return table.Table(
+        [
+            np.array([os.path.basename(spectrum_name)] * k, dtype="S200"),
+            np.array(["none"] * k, dtype="S200"),
+            np.array([name for _i, name in kept], dtype="S200"),
+            np.array([best_b[i] for i, _n in kept], dtype="f"),
+            np.zeros(k, dtype="f"),
+            np.array([best_z[i] for i, _n in kept], dtype="f"),
+            np.array([best_av[i] for i, _n in kept], dtype="f"),
+            np.array(phases, dtype="S200"),
+            np.array(bands, dtype="S200"),
+            np.ones(k, dtype="f"),
+            np.zeros(k, dtype="f"),
+            np.array([best_red1[i] for i, _n in kept], dtype="f"),
+            np.array([best_red2[i] for i, _n in kept], dtype="f"),
+        ],
+        names=(
+            "SPECTRUM",
+            "GALAXY",
+            "SN",
+            "CONST_SN",
+            "CONST_GAL",
+            "Z",
+            "A_v",
+            "Phase",
+            "Band",
+            "Frac(SN)",
+            "Frac(gal)",
+            "CHI2/dof",
+            "CHI2/dof2",
+        ),
+    )
+
+
 def core(
     int_obj,
     z,
@@ -429,6 +632,10 @@ def core(
     reduchi2_1d = reduchi2.ravel()
 
     index = np.argsort(reduchi2_1d)
+
+    # A bank smaller than `iterations` has fewer pairs than rows asked for;
+    # indexing past the grid raised IndexError rather than returning them all.
+    iterations = min(int(iterations), reduchi2_1d.size)
 
     # Column-wise accumulation, then ONE Table at the end. Building a
     # single-row astropy Table per result and stacking them cost more than
@@ -700,6 +907,62 @@ def resolve_worker_count(requested, n_tasks):
 
     return max(1, min(int(requested), n_tasks))
 
+def _load_metadata_templates(
+    metadata, resolution, mask_galaxy_lines, bank_dir, unreadable
+):
+    """Load every template a metadata scan names, prepared as the fit uses them.
+
+    10 A and 30 A come from the pre-binned bank; anything else is read at the
+    original resolution and binned on the fly. Host lines are masked when the
+    fit masks them. The relative path is taken against the bank's own
+    supernova root, not a search for the substring "sne" in the whole path: a
+    bank living under, say, /home/snelling/ would have that search cut the
+    path in the wrong place, and on Windows the separators are backslashes.
+
+    Returns ``(names, arrays)``: shorthand names in bank order, and the
+    prepared (n, 2) array for each. Templates that will not load are appended
+    to ``unreadable`` rather than raised, so one bad file costs one template,
+    not the fit.
+    """
+
+    sne_root = sne_dir(bank_dir=bank_dir)
+    pre_binned = resolution in (10, 30)
+    if pre_binned:
+        binned_root = sne_dir(resolution, bank_dir=bank_dir)
+
+    names = []
+    arrays = {}
+
+    for source_path in (
+        str(x) for x in metadata.dictionary_all_trunc_objects.values()
+    ):
+        try:
+            if pre_binned:
+                relative = os.path.relpath(source_path, sne_root)
+                one = load_template(
+                    os.path.join(binned_root, relative), "loadtxt",
+                    bank_dir=bank_dir,
+                )
+            else:
+                one = load_template(source_path, "kill_header", bank_dir=bank_dir)
+        except (OSError, ValueError) as exc:
+            unreadable.append(
+                (source_path, "{}: {}".format(type(exc).__name__, exc))
+            )
+            continue
+
+        if mask_galaxy_lines:
+            one = mask_lines_bank(one)
+        if not pre_binned:
+            one = bin_spectrum_bank(one, resolution)
+
+        short_name = str(metadata.shorhand_dict[os.path.basename(source_path)])
+        names.append(short_name)
+        arrays[short_name] = one
+
+    return names, arrays
+
+
 def all_parameter_space(
     int_obj,
     redshift,
@@ -770,14 +1033,9 @@ def all_parameter_space(
     # superfit.output for why that distinction earned its own module.
     results_path = os.fspath(kwargs["results_path"])
 
-    templates_sn_trunc_dict = {}
     templates_gal_trunc_dict = {}
-    sn_spec_files = [str(x) for x in metadata.shorhand_dict.values()]
-    path_dict = {}
 
     all_bank_files = [str(x) for x in metadata.dictionary_all_trunc_objects.values()]
-
-    #print(len(all_bank_files))
 
     # Templates the bank lists but cannot supply. One bank's metadata names
     # eight spectra that are not on disk, and another has a hundred-odd whose
@@ -799,44 +1057,9 @@ def all_parameter_space(
     # reading a pack built before the bank changed under it.
     packed_module.begin_fit()
 
-    def read_sn(path, reader):
-        try:
-            return load_template(path, reader, bank_dir=bank_dir)
-        except (OSError, ValueError) as exc:
-            unreadable.append((path, "{}: {}".format(type(exc).__name__, exc)))
-            return None
-
-    # 10 A and 30 A are pre-binned in the bank; anything else is binned from
-    # the original resolution on the fly. Both walk the same list, so this is
-    # one loop with the reader chosen up front rather than two copies of it.
-    pre_binned = resolution in (10, 30)
-    if pre_binned:
-        binned_root = sne_dir(resolution, bank_dir=bank_dir)
-
-    for source_path in all_bank_files:
-
-        if pre_binned:
-            # relpath against the bank's own supernova root, not a search for
-            # the substring "sne" in the whole path: a bank living under, say,
-            # /home/snelling/ would have that search cut the path in the
-            # wrong place, and on Windows the separators are backslashes.
-            relative = os.path.relpath(source_path, sne_root)
-            one_sn = read_sn(os.path.join(binned_root, relative), "loadtxt")
-        else:
-            one_sn = read_sn(source_path, "kill_header")
-
-        if one_sn is None:
-            continue
-
-        if mask_galaxy_lines:
-            one_sn = mask_lines_bank(one_sn)
-        if not pre_binned:
-            one_sn = bin_spectrum_bank(one_sn, resolution)
-
-        short_name = str(metadata.shorhand_dict[os.path.basename(source_path)])
-
-        path_dict[short_name] = source_path
-        templates_sn_trunc_dict[short_name] = one_sn
+    sn_spec_files, templates_sn_trunc_dict = _load_metadata_templates(
+        metadata, resolution, mask_galaxy_lines, bank_dir, unreadable
+    )
 
     for i in range(0, len(templates_gal_trunc)):
 
@@ -845,8 +1068,6 @@ def all_parameter_space(
         )
         one_gal = bin_spectrum_bank(one_gal, resolution)
         templates_gal_trunc_dict[templates_gal_trunc[i]] = one_gal
-
-    sn_spec_files = [x for x in path_dict.keys()]
 
     if unreadable:
         # Loud, and with examples: a bank quietly fitting against fewer
@@ -961,7 +1182,33 @@ def all_parameter_space(
         )
     )
 
-    result = table.vstack([t for group in results for t in group])
+    # --- the star and QSO categories ---------------------------------------
+    # Standalone single-template fits, ranked into the same table as the
+    # SN + host rows. Banks of a few dozen templates, solved vectorised in
+    # this process: no pool is worth forking for them. The legacy bank has
+    # neither, so both resolve off there and nothing below runs.
+    category_tables = _fit_categories(
+        parameters,
+        metadata_kwargs=dict(
+            resolution=resolution,
+            mask_galaxy_lines=mask_galaxy_lines,
+            bank_dir=bank_dir,
+        ),
+        int_obj=int_obj,
+        sigma=sigma,
+        lam=lam,
+        observed_grid=observed_grid,
+        redshift=redshift,
+        extconstant=extconstant,
+        R_v=kwargs.get("R_v", 3.1),
+        weighted=bool(kwargs.get("weighted_solve", False)),
+        minimum_overlap=kwargs["minimum_overlap"],
+        spectrum_name=kwargs.get("spectrum_name") or "spectrum",
+    )
+
+    result = table.vstack(
+        [t for group in results for t in group] + category_tables
+    )
 
     result.sort("CHI2/dof2")
 
@@ -978,6 +1225,120 @@ def all_parameter_space(
     print("Runtime: {0: .2f}s ".format(end - start))
 
     return
+
+
+def _warn_unreadable_category(unreadable, category):
+    if not unreadable:
+        return
+    print(
+        "WARNING: {0} {1} template(s) could not be read and were left out "
+        "of this fit:".format(len(unreadable), category)
+    )
+    for path, why in unreadable[:3]:
+        print("    {0}: {1}".format(path, why))
+    if len(unreadable) > 3:
+        print("    ... and {0} more".format(len(unreadable) - 3))
+
+
+def _fit_categories(
+    parameters,
+    metadata_kwargs,
+    int_obj,
+    sigma,
+    lam,
+    observed_grid,
+    redshift,
+    extconstant,
+    R_v,
+    weighted,
+    minimum_overlap,
+    spectrum_name,
+):
+    """Fit the star and QSO categories, returning their result tables.
+
+    Only the categories this fit's bank supplies and this fit's settings ask
+    for; see Parameters.fit_stars / fit_qsos. Each is a standalone fit --
+    :func:`fit_standalone` -- so no supernova is ever placed on top of a
+    QSO, and no star or QSO gets a host underneath it.
+    """
+
+    import time
+
+    resolution = metadata_kwargs["resolution"]
+    mask_galaxy_lines = metadata_kwargs["mask_galaxy_lines"]
+    bank_dir = metadata_kwargs["bank_dir"]
+
+    tables = []
+
+    if parameters.fit_stars and parameters.star_types:
+        from superfit.get_metadata import metadata_for_types
+
+        start = time.time()
+        unreadable = []
+        star_metadata = metadata_for_types(parameters, parameters.star_types)
+        names, arrays = _load_metadata_templates(
+            star_metadata, resolution, mask_galaxy_lines, bank_dir, unreadable
+        )
+        _warn_unreadable_category(unreadable, "star")
+
+        # Stars are foreground, so their redshift is pinned to zero. The A_v
+        # grid still applies: at z = 0 the law acts at the observed
+        # wavelength, which is exactly Galactic dust toward a star.
+        result = fit_standalone(
+            names, arrays, int_obj, sigma, lam, observed_grid,
+            [0.0], extconstant,
+            R_v=R_v, weighted=weighted, minimum_overlap=minimum_overlap,
+            spectrum_name=spectrum_name,
+        )
+        if result is not None:
+            tables.append(result)
+        print(
+            "Fitted {0} star templates at z = 0 in {1: .1f}s".format(
+                len(names), time.time() - start
+            )
+        )
+
+    if parameters.fit_qsos and parameters.templates_qso:
+        start = time.time()
+        unreadable = []
+        names = []
+        arrays = {}
+
+        for path in parameters.templates_qso:
+            try:
+                one = load_template(path, "loadtxt", bank_dir=bank_dir)
+            except (OSError, ValueError) as exc:
+                unreadable.append(
+                    (path, "{}: {}".format(type(exc).__name__, exc))
+                )
+                continue
+            if mask_galaxy_lines:
+                one = mask_lines_bank(one)
+            one = bin_spectrum_bank(one, resolution)
+
+            name = "QSO/" + os.path.basename(str(path))
+            names.append(name)
+            arrays[name] = one
+
+        _warn_unreadable_category(unreadable, "QSO")
+
+        # QSOs are extragalactic: the full redshift grid, like a supernova --
+        # just never with a host underneath and never under a transient.
+        result = fit_standalone(
+            names, arrays, int_obj, sigma, lam, observed_grid,
+            redshift, extconstant,
+            R_v=R_v, weighted=weighted, minimum_overlap=minimum_overlap,
+            spectrum_name=spectrum_name,
+        )
+        if result is not None:
+            tables.append(result)
+        print(
+            "Fitted {0} QSO templates over {1} redshift(s) in {2: .1f}s".format(
+                len(names), len(np.atleast_1d(redshift)), time.time() - start
+            )
+        )
+
+    return tables
 
 
 def grid_edge_warnings(result, redshift, extconstant, n_check=3):

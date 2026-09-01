@@ -46,6 +46,14 @@ The bank name is recorded in each run's `config.json`, because which
 templates produced a classification is part of the classification. See
 [docs/cli.md](https://github.com/Hallflower20/superfit/blob/main/docs/cli.md#superfit-bank-list).
 
+The modern banks also carry **stars** and **QSOs** as categories of their
+own: each is fit alone — no host galaxy underneath, stars pinned to z = 0,
+and a QSO never offered as a host for a transient — and ranked into the same
+results table, so "it's a star" and "it's a quasar" are answers the fit can
+give. Fitted automatically when the bank has them; `--no-stars` /
+`--no-qsos` turn them off. See
+[docs/methods.md](https://github.com/Hallflower20/superfit/blob/main/docs/methods.md#stars-and-qsos).
+
 Check it worked:
 
 ```bash

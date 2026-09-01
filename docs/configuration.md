@@ -228,6 +228,27 @@ speed.
 `epoch_low`, `epoch_high` — restrict templates to a phase window, in days
 from maximum light. Equal values (the default, both 0) mean no restriction.
 
+### Stars and QSOs
+
+`fit_stars`, `fit_qsos` — whether to fit the bank's stellar and QSO
+templates. Each is a category of its own, not a supernova type: every star
+or QSO is fit **alone**, with no host galaxy underneath, and ranked into the
+same results table as the SN + host pairs. Stars are foreground objects, so
+they are fit at redshift zero whatever redshift the transient search uses;
+QSOs are fit over the full redshift grid. Both sweep the A_v grid.
+
+The default is `"auto"`: fit them when the bank supplies them. The modern
+banks do (`sne/star-*` type directories, `gal/*QSO*` files); the legacy bank
+does not, so a legacy fit is unchanged. `true` requires them — naming a bank
+without them is then an error rather than a silent no-op — and `false`
+leaves them out. `Superfit(..., stars=False)` and `qsos=False` are accepted
+as shorthand.
+
+A QSO is **never** offered as a host galaxy, whatever these settings say: a
+transient on top of a quasar is not a model superfit will fit. Category rows
+report `GALAXY` as `none`, the whole model flux as `Frac(SN) = 1`, and the
+redshift they were actually fit at.
+
 ## Extinction
 
 `Alam_low`, `Alam_high`, `Alam_interval` — the A_v grid to search, in

@@ -102,6 +102,14 @@ DEFAULT_CONFIG = {
     "bank": "",
     "temp_sn_tr": ALL_SN_TYPES,
     "temp_gal_tr": ALL_GALAXY_TYPES,
+    # Stars and QSOs are categories of their own, not supernova types: each
+    # template is fit ALONE, with no host galaxy underneath, and a QSO is
+    # never offered as a host for a transient. "auto" fits them when the bank
+    # supplies them (the modern banks do; the legacy bank does not, so a
+    # legacy fit is unchanged). true requires them -- naming a bank without
+    # them is then an error -- and false leaves them out.
+    "fit_stars": "auto",
+    "fit_qsos": "auto",
     "resolution": 10,
     # The fit runs on a grid uniform in ln(lambda), so its step is a velocity
     # rather than a wavelength. None means "match the number of bins a linear
@@ -155,6 +163,22 @@ BOOLEAN_KEYS = frozenset(
 _TRUE = {"1", "true", "yes", "on", "y", "t"}
 _FALSE = {"0", "false", "no", "off", "n", "f"}
 
+# Settings that are on/off/auto. "auto" means "when the bank supplies it".
+TRISTATE_KEYS = frozenset(["fit_stars", "fit_qsos"])
+
+
+def as_tristate(value, key="value"):
+    """Interpret a setting that may be true, false, or "auto"."""
+
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    try:
+        return as_bool(value, key)
+    except ConfigError:
+        raise ConfigError(
+            "{} must be true, false or 'auto', got {!r}".format(key, value)
+        )
+
 
 # Named sets of scientific defaults.
 #
@@ -189,6 +213,8 @@ ALIASES = {
     "n_plots": "how_many_plots",
     "error_model": "error_spectrum",
     "cores": "n_cores",
+    "stars": "fit_stars",
+    "qsos": "fit_qsos",
 }
 
 
@@ -362,6 +388,9 @@ def load_config(source=None, profile=None, **overrides):
 
     for key in BOOLEAN_KEYS:
         config[key] = as_bool(config[key], key)
+
+    for key in TRISTATE_KEYS:
+        config[key] = as_tristate(config[key], key)
 
     validate_config(config)
     return config

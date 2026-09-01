@@ -72,6 +72,8 @@ for the full list of names that are recognised automatically.
 | `--rv R_V` | Total-to-selective extinction ratio. Default 3.1. |
 | `--av-range LOW HIGH` | Extinction range to search. Default -2 to 2. |
 | `--epochs LOW HIGH` | Restrict templates to a phase window, in days. Equal values mean no restriction. |
+| `--no-stars` | Do not fit the bank's stellar templates (fit alone at z = 0 by default, where the bank has them). |
+| `--no-qsos` | Do not fit the bank's QSO templates (fit alone over the z grid by default; never offered as hosts either way). |
 | `--no-mask-galaxy-lines` | Do not mask host emission lines. |
 | `--no-mask-telluric` | Do not mask the telluric A band. |
 | `--n-cores N` | Worker processes. 0 (default) means auto. |
