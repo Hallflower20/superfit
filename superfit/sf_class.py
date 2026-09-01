@@ -439,8 +439,8 @@ class Superfit:
     # would shadow any method of that name anyway; the old one was
     # unreachable and returned itself.
 
-    def _template_as_fitted(self, spec_file):
-        """One supernova template, prepared exactly as the fit prepared it.
+    def _template_as_fitted(self, spec_file, metadata=None):
+        """One supernova (or star) template, prepared exactly as the fit did.
 
         Same bank, same resolution, same masking, same reader. Every one of
         those used to be able to differ from the fit: the template was read
@@ -458,7 +458,9 @@ class Superfit:
         bank_dir = parameters.bank_dir
         resolution = parameters.resolution
 
-        source_path = self.metadata.dictionary_all_trunc_objects[spec_file]
+        if metadata is None:
+            metadata = self.metadata
+        source_path = metadata.dictionary_all_trunc_objects[spec_file]
         pre_binned = resolution in (10, 30)
 
         if pre_binned:
@@ -507,6 +509,10 @@ class Superfit:
 
         parameters = self.parameters
         row = self.results.iloc[j]
+
+        # A star or QSO row: the model is one template on its own.
+        if str(row["GALAXY"]) == "none":
+            return self._plot_rank_standalone(j, row)
 
         short_name = row["SN"]
         bb = row["CONST_SN"]
@@ -566,6 +572,106 @@ class Superfit:
         subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
         phase, _band = split_phase_band(short_name)
 
+        label = (
+            "SN: "
+            + sn_type
+            + " - "
+            + subclass
+            + " - Phase: "
+            + phase
+            + "\nHost: "
+            + str(os.path.basename(hg_path))
+            + "\nSN contrib: {0: .1f}%".format(100 * sn_cont)
+        )
+
+        return self._render_plot(j, host_nova, label, z)
+
+    @property
+    def _star_metadata(self):
+        """The bank scan behind the star category, built once when needed."""
+
+        cached = getattr(self, "_star_metadata_cache", None)
+        if cached is None:
+            from superfit.get_metadata import metadata_for_types
+
+            cached = metadata_for_types(
+                self.parameters, self.parameters.star_types
+            )
+            self._star_metadata_cache = cached
+        return cached
+
+    def _plot_rank_standalone(self, j, row):
+        """Plot a star or QSO row: one template, no host, as it was fitted."""
+
+        parameters = self.parameters
+
+        short_name = str(row["SN"])
+        bb = row["CONST_SN"]
+        z = row["Z"]
+        extmag = row["A_v"]
+
+        if short_name.startswith("QSO/"):
+            basename = short_name[len("QSO/"):]
+            for candidate in parameters.templates_qso:
+                if os.path.basename(str(candidate)) == basename:
+                    break
+            else:
+                raise KeyError(
+                    "No QSO template named {!r} among the {} this fit used; "
+                    "the results were produced against a different "
+                    "bank.".format(basename, len(parameters.templates_qso))
+                )
+
+            template = load_template(
+                candidate, "loadtxt", bank_dir=parameters.bank_dir
+            )
+            if parameters.mask_galaxy_lines:
+                template = mask_lines_bank(template)
+            template = bin_spectrum_bank(template, parameters.resolution)
+            label = "QSO: " + basename
+
+        else:
+            by_shorthand = {
+                str(v): str(k)
+                for k, v in self._star_metadata.shorhand_dict.items()
+            }
+            if short_name not in by_shorthand:
+                raise KeyError(
+                    "No star template file for {!r} in the bank metadata; "
+                    "the results were produced against a different "
+                    "bank.".format(short_name)
+                )
+            template = self._template_as_fitted(
+                by_shorthand[short_name], metadata=self._star_metadata
+            )
+            star_type = short_name[: short_name.find("/")]
+            star_object = short_name[
+                short_name.find("/") + 1 : short_name.rfind("/")
+            ]
+            label = "Star: " + star_type + " - " + star_object
+
+        template = np.array(template, dtype=float, copy=True)
+        template[:, 1] = template[:, 1] / np.nanmedian(template[:, 1])
+
+        # The model the fitter scored: reddened at the template's rest
+        # wavelength, shifted and dimmed by (1 + z) -- for a star, z is 0 and
+        # both are the identity.
+        reddened = (
+            template[:, 1]
+            * 10 ** (-0.4 * extmag * Alam(template[:, 0], R_v=parameters.R_v))
+            / (z + 1)
+        )
+        model = bb * interpolate.interp1d(
+            template[:, 0] * (z + 1), reddened,
+            bounds_error=False, fill_value="nan",
+        )(parameters.lam)
+
+        return self._render_plot(j, model, label, z)
+
+    def _render_plot(self, j, model, model_label, z):
+        """Draw the observation against ``model`` and save it by rank."""
+
+        parameters = self.parameters
         path = self.output.plot(j + 1, png=parameters.show_plot_png)
 
         # Held explicitly rather than left on pyplot's global stack: a batch
@@ -577,20 +683,7 @@ class Superfit:
                 parameters.lam, self.int_obj, "r",
                 label="Input object: " + self.name,
             )
-            plt.plot(
-                parameters.lam,
-                host_nova,
-                "g",
-                label="SN: "
-                + sn_type
-                + " - "
-                + subclass
-                + " - Phase: "
-                + phase
-                + "\nHost: "
-                + str(os.path.basename(hg_path))
-                + "\nSN contrib: {0: .1f}%".format(100 * sn_cont),
-            )
+            plt.plot(parameters.lam, model, "g", label=model_label)
             plt.legend(framealpha=1, frameon=True, fontsize=12)
             plt.ylabel("Flux arbitrary", fontsize=14)
             plt.xlabel("Lamda", fontsize=14)

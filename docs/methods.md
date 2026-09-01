@@ -91,6 +91,31 @@ see the warnings below.
 `R_v` shapes the curve that A_v scales; 3.1 is the diffuse Milky Way
 average and the usual default.
 
+## Stars and QSOs
+
+The modern banks carry two categories beyond supernovae, and each is matched
+on its own terms rather than as a transient:
+
+- **Stars** (`sne/star-*` type directories). A star is foreground, so it is
+  fit at redshift zero regardless of the redshift the transient search uses,
+  and with no host galaxy underneath — the model is `b * template`, one
+  amplitude. The A_v grid still applies: at z = 0 the extinction law acts at
+  the observed wavelength, which is exactly Galactic dust toward a star.
+- **QSOs** (`gal/*QSO*` files). A QSO is extragalactic, so it sweeps the full
+  (z, A_v) grid like a supernova — but alone. It is **never** offered as a
+  host: a transient on top of a quasar is not a model superfit will fit, so
+  QSO-named files are removed from the host list unconditionally.
+
+Both use the same chi2 conventions as the supernova fit — the same weights,
+the same overlap cut, the same reduced-chi2 denominators, and the same
+legacy/modern amplitude convention — so their rows rank against the SN + host
+rows on one footing, in one table. A category row reports `GALAXY` as
+`none` and attributes the whole model flux to the template.
+
+The legacy bank carries neither category, so a legacy fit is unchanged; see
+`fit_stars` and `fit_qsos` in
+[docs/configuration.md](configuration.md#stars-and-qsos).
+
 ## A note on the weighting
 
 In the `legacy` profile — the default — the supernova and galaxy amplitudes

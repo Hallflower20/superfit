@@ -226,3 +226,26 @@ def get_metadata(parameters):
         _cached_metadata = metadata
         _cached_key = key
         return metadata
+
+
+def metadata_for_types(parameters, types):
+    """A bank scan over ``types`` only, on the same bank as ``parameters``.
+
+    Used for the star category, whose types live alongside the supernova
+    types but are fit separately. Built directly rather than through
+    :func:`get_metadata`: the cache there holds one scan, and alternating a
+    tiny star scan with the main one would evict the expensive answer to keep
+    the cheap one.
+    """
+
+    from types import SimpleNamespace
+
+    shim = SimpleNamespace(
+        bank_dir=getattr(parameters, "bank_dir", None),
+        phase_table=getattr(parameters, "phase_table", None),
+        temp_sn_tr=list(types),
+        # No phase window: stars have no epoch of maximum to measure from.
+        epoch_low=0,
+        epoch_high=0,
+    )
+    return Metadata(shim)

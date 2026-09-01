@@ -30,6 +30,31 @@ parseJsonFile = config_module.parse_json_file
 load_config = config_module.load_config
 
 
+def is_qso_name(path):
+    """Whether a galaxy-directory template is a QSO, by its name.
+
+    The modern banks ship their QSO templates in the galaxy directory as
+    ``DESI_QSO_<targetid>``. A QSO is never a host: offering one under a
+    transient would fit supernovae on top of quasars, which is exactly the
+    combination the QSO category exists to replace. So anything the galaxy
+    glob finds with a QSO name is pulled out of the host list unconditionally
+    and fit on its own instead.
+    """
+
+    return "QSO" in os.path.basename(str(path)).upper()
+
+
+def is_star_type(name):
+    """Whether a supernova-type directory holds stars, by its name.
+
+    The modern banks ship stellar templates as type directories named
+    ``star-A`` .. ``star-WD`` alongside the supernova types. They are a
+    category of their own: fit alone, with no host, at redshift zero.
+    """
+
+    return str(name).lower().startswith("star")
+
+
 class Parameters:
     """Everything one fit needs, derived once from one configuration.
 
@@ -207,11 +232,62 @@ class Parameters:
         templates_gal = [
             x for x in templates_gal if "CVS" not in x and "README" not in x
         ]
-        templates_gal = np.array(templates_gal)
+
+        # QSOs live in the galaxy directory but are not hosts; see
+        # is_qso_name. Split them out BEFORE the type selection, so no
+        # temp_gal_tr setting can put a transient on top of a quasar.
+        self.templates_qso = sorted(x for x in templates_gal if is_qso_name(x))
+        templates_gal = np.array([x for x in templates_gal if not is_qso_name(x)])
 
         self.templates_gal_trunc = select_templates(templates_gal, self.temp_gal_tr)
 
+        if len(self.templates_gal_trunc) == 0:
+            raise config_module.ConfigError(
+                "No galaxy template in {} matches temp_gal_tr={!r}. Every "
+                "transient is fit as SN + host, so an empty host list fits "
+                "nothing. (QSO templates do not count: they are never "
+                "hosts.)".format(
+                    gal_dir(binned, self.bank_dir), list(self.temp_gal_tr)
+                )
+            )
+
+        # Star types the bank supplies: type directories named star-*.
+        try:
+            sne_root = sne_dir(bank_dir=self.bank_dir)
+            self.star_types = sorted(
+                entry
+                for entry in os.listdir(sne_root)
+                if is_star_type(entry)
+                and os.path.isdir(os.path.join(sne_root, entry))
+            )
+        except OSError:
+            self.star_types = []
+
+        # "auto" means "when the bank supplies them", which is what keeps the
+        # legacy bank exactly as it was: it has neither, so both resolve off.
+        self.fit_stars = self._resolve_category(
+            data["fit_stars"], "fit_stars", self.star_types,
+            "star templates (sne/star-* type directories)",
+        )
+        self.fit_qsos = self._resolve_category(
+            data["fit_qsos"], "fit_qsos", self.templates_qso,
+            "QSO templates (gal/*QSO* files)",
+        )
+
         self._frozen = True
+
+    def _resolve_category(self, setting, key, supply, what):
+        """Turn a true/false/"auto" category setting into a plain bool."""
+
+        if setting == "auto":
+            return bool(supply)
+        if setting and not supply:
+            raise config_module.ConfigError(
+                "{}=true, but the bank at {} has no {}. The legacy bank does "
+                "not carry them; fit against one of the modern banks, or "
+                "leave {} on 'auto'.".format(key, self.bank_dir, what, key)
+            )
+        return bool(setting)
 
     @functools.cached_property
     def templates_sn_trunc(self):

@@ -337,3 +337,18 @@ class TestErrorsAreReported:
 
         assert main(["fit"]) == 1
         assert "No spectrum to fit" in capsys.readouterr().err
+
+
+class TestCategoryFlags:
+    """--no-stars and --no-qsos map onto the category settings."""
+
+    def test_default_is_auto(self):
+        config = overrides_for("--z", "0.1")
+        assert config["fit_stars"] == "auto"
+        assert config["fit_qsos"] == "auto"
+
+    def test_no_stars(self):
+        assert overrides_for("--z", "0.1", "--no-stars")["fit_stars"] is False
+
+    def test_no_qsos(self):
+        assert overrides_for("--z", "0.1", "--no-qsos")["fit_qsos"] is False

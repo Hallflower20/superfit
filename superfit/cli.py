@@ -172,6 +172,20 @@ def _add_fit_parser(subparsers):
         "mean no restriction.",
     )
     fitting.add_argument(
+        "--no-stars",
+        action="store_true",
+        help="Do not fit the bank's stellar templates. By default a bank "
+        "that carries them (the modern banks) has each star fit on its own, "
+        "at z = 0, with no host galaxy.",
+    )
+    fitting.add_argument(
+        "--no-qsos",
+        action="store_true",
+        help="Do not fit the bank's QSO templates. By default a bank that "
+        "carries them has each QSO fit on its own over the redshift grid; "
+        "QSOs are never offered as hosts for transients either way.",
+    )
+    fitting.add_argument(
         "--no-mask-galaxy-lines",
         action="store_true",
         help="Do not mask host galaxy emission lines.",
@@ -498,6 +512,11 @@ def fit_overrides(args):
         overrides["epoch_low"], overrides["epoch_high"] = args.epochs
     if args.n_cores is not None:
         overrides["n_cores"] = args.n_cores
+
+    if args.no_stars:
+        overrides["fit_stars"] = False
+    if args.no_qsos:
+        overrides["fit_qsos"] = False
 
     if args.no_mask_galaxy_lines:
         overrides["mask_galaxy_lines"] = False
@@ -980,6 +999,8 @@ COMMON_KEYS = [
     ("z_range_end", "Last redshift of the scan."),
     ("z_int", "Redshift step of the scan."),
     ("resolution", "Binning resolution in Angstroms. 10 and 30 use the pre-binned bank."),
+    ("fit_stars", "Fit the bank's stars, alone at z=0. 'auto' means when the bank has them."),
+    ("fit_qsos", "Fit the bank's QSOs, alone over the z grid. 'auto' means when the bank has them."),
     ("error_spectrum", "'sg', 'linear', or 'included' to use the file's own error column."),
     ("mask_galaxy_lines", "Mask host emission lines. Needs a single redshift."),
     ("mask_telluric", "Mask the telluric A band, 7594-7680 A observed."),
