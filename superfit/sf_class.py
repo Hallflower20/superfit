@@ -5,24 +5,23 @@ import numpy as np
 import pandas as pd
 from scipy import interpolate
 from scipy.ndimage import gaussian_filter1d
-from astropy.table import Table
 
 
-from superfit.SF_functions import Alam, all_parameter_space, remove_telluric, mask_gal_lines
-from superfit.config import ConfigError, load_config
-from superfit.Header_Binnings import (
-    bin_spectrum_bank,
-    kill_header,
-    kill_header_and_bin,
-    mask_lines_bank,
-    normalise_flux,
+from superfit.SF_functions import (
+    Alam,
+    all_parameter_space,
+    mask_gal_lines,
+    remove_telluric,
+    split_phase_band,
 )
+from superfit.config import ConfigError, load_config
+from superfit.Header_Binnings import bin_spectrum_bank, mask_lines_bank
 from superfit.error_routines import linear_error, savitzky_golay
 from superfit.get_metadata import get_metadata
 from superfit.output import FitResult, RunDirectory
 from superfit.packed import load_template
 from superfit.params import Parameters
-from superfit.paths import gal_dir, sne_dir
+from superfit.paths import sne_dir
 from superfit.spectrum import Spectrum
 
 
@@ -321,7 +320,15 @@ class Superfit:
 
     def mask_gal_lines_and_telluric(self):
 
-        Data_masked = mask_gal_lines(self.name, z_obj=self.parameters.redshift)
+        parameters = self.parameters
+        if not parameters.use_exact_z:
+            raise Exception(
+                "Make sure to pick an exact value for z in order to mask the host lines accordingly!"
+            )
+
+        # This used to pass self.name -- the spectrum's *name* -- where the
+        # masking wants the data, so calling it raised from inside numpy.
+        Data_masked = mask_gal_lines(self.spectrum, z_obj=parameters.redshift[0])
         masked_spectrum = remove_telluric(Data_masked)
 
         plt.figure(figsize=(7 * np.sqrt(2), 7))
@@ -373,7 +380,10 @@ class Superfit:
             self.int_obj,
             parameters.redshift,
             parameters.extconstant,
-            parameters.templates_sn_trunc,
+            # The supernova list is resolved from the bank metadata inside;
+            # this positional slot is kept for callers that still fill it, but
+            # filling it from parameters would glob the whole bank for nothing.
+            None,
             parameters.templates_gal_trunc,
             parameters.lam,
             parameters.resolution,
@@ -554,7 +564,7 @@ class Superfit:
         # would be the wrong tool here rather than the right one.
         sn_type = short_name[: short_name.find("/")]
         subclass = short_name[short_name.find("/") + 1 : short_name.rfind("/")]
-        phase = str(short_name[short_name.rfind(":") + 1 : -1])
+        phase, _band = split_phase_band(short_name)
 
         path = self.output.plot(j + 1, png=parameters.show_plot_png)
 

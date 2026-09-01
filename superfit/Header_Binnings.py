@@ -175,17 +175,22 @@ def bin_spectrum(spectrum, resolution):
             (bin_edge[i] + bin_edge[i + 1]) / 2 for i in range(len(bin_edge) - 1)
         ]
 
-        # This is the condition I had to add to get rid of the NaNs, but I still don’t know why flux_bin has NaNs in the first place
+        # A NaN in flux_bin is an empty bin; those rows are dropped below.
 
         if fluxerror is not None:
-            fluxerror_bin = []
-            for i in range(len(bin_edge) - 1):
-                error_squared = []
-                for index, la in enumerate(lam):
-                    if la >= bin_edge[i] and la < bin_edge[i + 1]:
-                        error_squared.append(fluxerror[index] ** 2)
-                    error = np.sqrt(np.sum(error_squared) / len(error_squared))
-                fluxerror_bin.append(error)
+            # Root-mean-square of the errors falling in each bin, on the same
+            # edges as the flux. The previous version looped pixels inside a
+            # loop over bins, recomputed the result once per *pixel*, raised
+            # ZeroDivisionError on the first empty bin, and excluded the last
+            # pixel of the spectrum from the last bin.
+            mean_square, _, _ = stats.binned_statistic(
+                lam,
+                np.asarray(fluxerror, dtype=float) ** 2,
+                statistic="mean",
+                range=(lam.min(), lam.max()),
+                bins=number_of_bins,
+            )
+            fluxerror_bin = np.sqrt(mean_square)
 
         bin_wavelength = np.array(bin_wavelength)
         flux_bin = np.array(flux_bin)

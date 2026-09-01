@@ -16,7 +16,7 @@ which is exactly the signal we want.
 import numpy as np
 import pytest
 
-from superfit.SF_functions import Alam, redshifted_models, solve_grid
+from superfit.SF_functions import Alam, GridSolver, redshifted_models, solve_grid
 from superfit.loggrid import LogGrid, RedshiftableTemplates, velocity_to_dlnlam
 
 
@@ -625,3 +625,74 @@ class TestPlottingReconstructsTheFittedModel:
         np.testing.assert_allclose(
             fitted[finite], plotted[finite], rtol=5e-3, atol=5e-3
         )
+
+
+class TestGridSolver:
+    """GridSolver hoists the A_v-independent half of solve_grid.
+
+    The contract is stronger than "close": the per-A_v terms are evaluated by
+    the same operations in the same order, so the results must be
+    bit-identical to reddening the bank first and calling solve_grid on it.
+    """
+
+    @pytest.mark.parametrize("weighted", [False, True], ids=["legacy", "weighted"])
+    @pytest.mark.parametrize("extcon", [-2.0, 0.0, 0.6, 2.0])
+    def test_bit_identical_to_reddening_the_bank_first(self, rng, weighted, extcon):
+        sn, gal, obj, sigma = TestSolveGrid._ragged_problem(
+            rng, gap_obj=True, gap_sig=True
+        )
+        lam = np.linspace(3500.0, 9000.0, obj.size)
+        reddening = 10 ** (-0.4 * extcon * Alam(lam))
+
+        solver = GridSolver(sn, gal, obj, sigma, weighted=weighted)
+        got = solver.solve(reddening)
+        want = solve_grid(sn * reddening, gal, obj, sigma, weighted=weighted)
+
+        for g, w, name in zip(got, want, ("b", "d", "chi2", "times")):
+            np.testing.assert_array_equal(g, w, err_msg=name)
+
+    def test_solve_with_no_reddening_is_solve_grid(self, rng):
+        sn, gal, obj, sigma = TestSolveGrid._ragged_problem(rng)
+
+        got = GridSolver(sn, gal, obj, sigma).solve()
+        want = solve_grid(sn, gal, obj, sigma)
+
+        for g, w in zip(got, want):
+            np.testing.assert_array_equal(g, w)
+
+    def test_one_solver_serves_a_whole_extinction_grid(self, rng):
+        """Reusing the solver across A_v values must not leak state."""
+
+        sn, gal, obj, sigma = TestSolveGrid._ragged_problem(rng)
+        lam = np.linspace(3500.0, 9000.0, obj.size)
+        solver = GridSolver(sn, gal, obj, sigma)
+
+        grid = [-1.0, 0.0, 1.0]
+        first_pass = [solver.solve(10 ** (-0.4 * a * Alam(lam))) for a in grid]
+        # Same values again, out of order, after the solver has been used.
+        again = solver.solve(10 ** (-0.4 * grid[0] * Alam(lam)))
+
+        for g, w in zip(again, first_pass[0]):
+            np.testing.assert_array_equal(g, w)
+
+
+class TestSplitPhaseBand:
+    """The shorthand tail ": {phase}{band}" split into its two columns."""
+
+    @pytest.mark.parametrize(
+        "shorthand,phase,band",
+        [
+            ("Ic/1994I/KAST phase-band : -2.57B", "-2.57", "B"),
+            ("II/1999em/X phase-band : 12.0-", "12.0", "-"),
+            ("Ia/2011fe/X phase-band : uB", "u", "B"),
+            # The cases the old last-character split got wrong: an object the
+            # phase table does not cover has no band, and the split handed the
+            # Band column the last digit of the phase (or the "u").
+            ("Ia/2099xx/X phase-band : 12.5", "12.5", ""),
+            ("Ia/2099xx/X phase-band : u", "u", ""),
+        ],
+    )
+    def test_split(self, shorthand, phase, band):
+        from superfit.SF_functions import split_phase_band
+
+        assert split_phase_band(shorthand) == (phase, band)
